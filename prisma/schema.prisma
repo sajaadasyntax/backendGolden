@@ -1,0 +1,951 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== USER MANAGEMENT ====================
+
+model Branch {
+  id        String   @id @default(uuid())
+  name      String
+  nameAr    String
+  code      String   @unique
+  address   String?
+  phone     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users           User[]
+  dayCycles       DayCycle[]
+  purchaseOrders  PurchaseOrder[]
+  salesOrders     SalesOrder[]
+  transactions    Transaction[]
+  expenses        Expense[]
+  pricePolicies   PricePolicy[]
+  auditLogs       AuditLog[]
+
+  @@map("branches")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  passwordHash String
+  name         String
+  nameAr       String?
+  role         UserRole
+  branchId     String?
+  isActive     Boolean   @default(true)
+  lastLoginAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  branch                 Branch?                  @relation(fields: [branchId], references: [id])
+  sessions               Session[]
+  openedDayCycles        DayCycle[]               @relation("OpenedBy")
+  closedDayCycles        DayCycle[]               @relation("ClosedBy")
+  createdPurchaseOrders  PurchaseOrder[]          @relation("POCreatedBy")
+  approvedPurchaseOrders PurchaseOrder[]          @relation("POApprovedBy")
+  goodsReceipts          GoodsReceipt[]
+  createdSupplierInvoices SupplierInvoice[]
+  matchedBankNotices     BankNotice[]
+  createdSalesOrders     SalesOrder[]
+  createdSalesInvoices   SalesInvoice[]
+  goodsRequests          GoodsRequest[]
+  goodsRequestApprovals  GoodsRequestApproval[]
+  postedJournalEntries   JournalEntry[]
+  transactions           Transaction[]
+  createdExpenses        Expense[]                @relation("ExpenseCreatedBy")
+  approvedExpenses       Expense[]                @relation("ExpenseApprovedBy")
+  auditLogs              AuditLog[]
+  shelf                  Shelf[]                  // User's assigned shelf
+
+  @@index([branchId])
+  @@index([email])
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@map("sessions")
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  WAREHOUSE_SALES
+  SHELF_SALES
+  PROCUREMENT
+  ACCOUNTANT
+}
+
+// ==================== DAY CYCLE ====================
+
+model DayCycle {
+  id                 String         @id @default(uuid())
+  branchId           String
+  cycleDate          DateTime       @db.Date
+  exchangeRateUsdSdg Decimal        @db.Decimal(18, 6)
+  status             DayCycleStatus @default(OPEN)
+  openedById         String
+  openedAt           DateTime       @default(now())
+  closedById         String?
+  closedAt           DateTime?
+  notes              String?
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  branch               Branch                  @relation(fields: [branchId], references: [id])
+  openedBy             User                    @relation("OpenedBy", fields: [openedById], references: [id])
+  closedBy             User?                   @relation("ClosedBy", fields: [closedById], references: [id])
+  goodsReceipts        GoodsReceipt[]
+  salesOrders          SalesOrder[]
+  salesInvoices        SalesInvoice[]
+  dailyAggregateInvoices DailyAggregateInvoice[]
+  journalEntries       JournalEntry[]
+  transactions         Transaction[]
+  expenses             Expense[]
+
+  @@unique([branchId, cycleDate])
+  @@index([branchId])
+  @@index([cycleDate])
+  @@map("day_cycles")
+}
+
+enum DayCycleStatus {
+  OPEN
+  PENDING_CLOSE
+  CLOSED
+}
+
+// ==================== INVENTORY ====================
+
+model ItemCategory {
+  id        String   @id @default(uuid())
+  name      String
+  nameAr    String
+  parentId  String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parent   ItemCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children ItemCategory[] @relation("CategoryHierarchy")
+  items    Item[]
+
+  @@map("item_categories")
+}
+
+model Unit {
+  id        String   @id @default(uuid())
+  name      String
+  nameAr    String
+  symbol    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items Item[]
+
+  @@map("units")
+}
+
+model Item {
+  id            String   @id @default(uuid())
+  sku           String   @unique
+  nameEn        String
+  nameAr        String
+  description   String?
+  categoryId    String
+  unitId        String
+  isConsignment Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  minStockLevel Decimal? @db.Decimal(18, 4)
+  maxStockLevel Decimal? @db.Decimal(18, 4)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  category             ItemCategory          @relation(fields: [categoryId], references: [id])
+  unit                 Unit                  @relation(fields: [unitId], references: [id])
+  pricePolicies        PricePolicy[]
+  batches              Batch[]
+  purchaseOrderLines   PurchaseOrderLine[]
+  goodsReceiptLines    GoodsReceiptLine[]
+  salesOrderLines      SalesOrderLine[]
+  salesInvoiceLines    SalesInvoiceLine[]
+  goodsRequestLines    GoodsRequestLine[]
+
+  @@index([categoryId])
+  @@index([sku])
+  @@map("items")
+}
+
+model PricePolicy {
+  id               String    @id @default(uuid())
+  itemId           String
+  branchId         String
+  wholesalePriceUsd Decimal  @db.Decimal(18, 4)
+  retailPriceUsd   Decimal   @db.Decimal(18, 4)
+  priceRangeMinUsd Decimal   @db.Decimal(18, 4)
+  priceRangeMaxUsd Decimal   @db.Decimal(18, 4)
+  effectiveFrom    DateTime  @db.Date
+  effectiveTo      DateTime? @db.Date
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  item   Item   @relation(fields: [itemId], references: [id])
+  branch Branch @relation(fields: [branchId], references: [id])
+
+  @@index([itemId, branchId])
+  @@map("price_policies")
+}
+
+model Warehouse {
+  id        String   @id @default(uuid())
+  name      String
+  nameAr    String
+  code      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  batches           Batch[]
+  goodsReceiptLines GoodsReceiptLine[]
+  salesOrders       SalesOrder[]
+
+  @@map("warehouses")
+}
+
+model Shelf {
+  id        String   @id @default(uuid())
+  userId    String?  // Link to user - each shelf belongs to a specific user
+  name      String
+  nameAr    String
+  code      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user                   User?                   @relation(fields: [userId], references: [id])
+  batches                Batch[]
+  salesInvoices          SalesInvoice[]
+  dailyAggregateInvoices DailyAggregateInvoice[]
+  goodsRequests          GoodsRequest[]
+
+  @@index([userId])
+  @@map("shelves")
+}
+
+model Batch {
+  id                 String       @id @default(uuid())
+  itemId             String
+  warehouseId        String?
+  shelfId            String?
+  qtyReceived        Decimal      @db.Decimal(18, 4)
+  qtyRemaining       Decimal      @db.Decimal(18, 4)
+  unitCostUsd        Decimal      @db.Decimal(18, 6)
+  receivedDate       DateTime     @db.Date
+  goodsReceiptLineId String?
+  isConsignment      Boolean      @default(false)
+  consignorId        String?
+  expiryDate         DateTime?    @db.Date
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  item              Item               @relation(fields: [itemId], references: [id])
+  warehouse         Warehouse?         @relation(fields: [warehouseId], references: [id])
+  shelf             Shelf?             @relation(fields: [shelfId], references: [id])
+  goodsReceiptLine  GoodsReceiptLine?  @relation(fields: [goodsReceiptLineId], references: [id])
+  consignor         Supplier?          @relation(fields: [consignorId], references: [id])
+  stockMovements    StockMovement[]
+  salesInvoiceLines SalesInvoiceLine[]
+
+  @@index([itemId])
+  @@index([warehouseId])
+  @@index([shelfId])
+  @@index([receivedDate])
+  @@map("batches")
+}
+
+model StockMovement {
+  id            String            @id @default(uuid())
+  batchId       String
+  qty           Decimal           @db.Decimal(18, 4)
+  movementType  StockMovementType
+  referenceId   String?
+  referenceType String?
+  notes         String?
+  createdAt     DateTime          @default(now())
+
+  batch Batch @relation(fields: [batchId], references: [id])
+
+  @@index([batchId])
+  @@index([referenceId, referenceType])
+  @@map("stock_movements")
+}
+
+enum StockMovementType {
+  RECEIPT
+  ISSUE
+  TRANSFER_IN
+  TRANSFER_OUT
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+  RETURN_IN
+  RETURN_OUT
+}
+
+// ==================== PROCUREMENT ====================
+
+model Supplier {
+  id            String   @id @default(uuid())
+  name          String
+  nameAr        String?
+  contactPerson String?
+  phone         String?
+  email         String?
+  address       String?
+  taxNumber     String?
+  balanceSdg    Decimal  @default(0) @db.Decimal(18, 2)
+  isConsignor   Boolean  @default(false)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  purchaseOrders   PurchaseOrder[]
+  supplierInvoices SupplierInvoice[]
+  consignmentBatches Batch[]
+
+  @@map("suppliers")
+}
+
+model PurchaseOrder {
+  id           String   @id @default(uuid())
+  poNumber     String   @unique
+  supplierId   String
+  branchId     String
+  orderDate    DateTime @db.Date
+  expectedDate DateTime? @db.Date
+  totalSdg     Decimal  @db.Decimal(18, 2)
+  status       POStatus @default(DRAFT)
+  notes        String?
+  createdById  String
+  approvedById String?
+  approvedAt   DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  supplier         Supplier            @relation(fields: [supplierId], references: [id])
+  branch           Branch              @relation(fields: [branchId], references: [id])
+  createdBy        User                @relation("POCreatedBy", fields: [createdById], references: [id])
+  approvedBy       User?               @relation("POApprovedBy", fields: [approvedById], references: [id])
+  lines            PurchaseOrderLine[]
+  goodsReceipts    GoodsReceipt[]
+  supplierInvoices SupplierInvoice[]
+
+  @@index([supplierId])
+  @@index([branchId])
+  @@index([status])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderLine {
+  id              String  @id @default(uuid())
+  purchaseOrderId String
+  itemId          String
+  qty             Decimal @db.Decimal(18, 4)
+  unitPriceSdg    Decimal @db.Decimal(18, 4)
+  totalSdg        Decimal @db.Decimal(18, 2)
+  qtyReceived     Decimal @default(0) @db.Decimal(18, 4)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  purchaseOrder     PurchaseOrder      @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  item              Item               @relation(fields: [itemId], references: [id])
+  goodsReceiptLines GoodsReceiptLine[]
+
+  @@index([purchaseOrderId])
+  @@map("purchase_order_lines")
+}
+
+enum POStatus {
+  DRAFT
+  APPROVED
+  PARTIALLY_RECEIVED
+  FULLY_RECEIVED
+  CLOSED
+  CANCELLED
+}
+
+model GoodsReceipt {
+  id               String           @id @default(uuid())
+  grNumber         String           @unique
+  purchaseOrderId  String
+  dayCycleId       String
+  receiptDate      DateTime         @db.Date
+  receiptType      GoodsReceiptType
+  exchangeRateUsed Decimal          @db.Decimal(18, 6)
+  notes            String?
+  receivedById     String
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  purchaseOrder PurchaseOrder      @relation(fields: [purchaseOrderId], references: [id])
+  dayCycle      DayCycle           @relation(fields: [dayCycleId], references: [id])
+  receivedBy    User               @relation(fields: [receivedById], references: [id])
+  lines         GoodsReceiptLine[]
+
+  @@index([purchaseOrderId])
+  @@index([dayCycleId])
+  @@map("goods_receipts")
+}
+
+model GoodsReceiptLine {
+  id                  String  @id @default(uuid())
+  goodsReceiptId      String
+  purchaseOrderLineId String
+  itemId              String
+  qtyReceived         Decimal @db.Decimal(18, 4)
+  unitCostSdg         Decimal @db.Decimal(18, 4)
+  unitCostUsd         Decimal @db.Decimal(18, 6)
+  warehouseId         String
+  createdAt           DateTime @default(now())
+
+  goodsReceipt      GoodsReceipt      @relation(fields: [goodsReceiptId], references: [id], onDelete: Cascade)
+  purchaseOrderLine PurchaseOrderLine @relation(fields: [purchaseOrderLineId], references: [id])
+  item              Item              @relation(fields: [itemId], references: [id])
+  warehouse         Warehouse         @relation(fields: [warehouseId], references: [id])
+  batches           Batch[]
+
+  @@index([goodsReceiptId])
+  @@map("goods_receipt_lines")
+}
+
+enum GoodsReceiptType {
+  PARTIAL
+  FULL
+}
+
+model SupplierInvoice {
+  id                String                @id @default(uuid())
+  invoiceNumber     String
+  supplierId        String
+  purchaseOrderId   String?
+  totalSdg          Decimal               @db.Decimal(18, 2)
+  invoiceDate       DateTime              @db.Date
+  dueDate           DateTime              @db.Date
+  status            SupplierInvoiceStatus @default(DRAFT)
+  notes             String?
+  createdById       String
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+  
+  // Payment tracking fields
+  paymentMethod     PaymentMethod?
+  paidDate          DateTime?             @db.Date
+  paidAmountSdg     Decimal?              @db.Decimal(18, 2)
+  transactionNumber String?
+  receiptImageUrl   String?
+  paidById          String?
+
+  supplier        Supplier          @relation(fields: [supplierId], references: [id])
+  purchaseOrder   PurchaseOrder?    @relation(fields: [purchaseOrderId], references: [id])
+  createdBy       User              @relation(fields: [createdById], references: [id])
+  paymentSchedules PaymentSchedule[]
+  bankNotices     BankNotice[]
+
+  @@unique([supplierId, invoiceNumber])
+  @@index([supplierId])
+  @@index([status])
+  @@map("supplier_invoices")
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+}
+
+enum SupplierInvoiceStatus {
+  DRAFT
+  CONFIRMED
+  OUTSTANDING
+  SCHEDULED
+  PAID
+  CANCELLED
+}
+
+model PaymentSchedule {
+  id        String                @id @default(uuid())
+  invoiceId String
+  amountSdg Decimal               @db.Decimal(18, 2)
+  dueDate   DateTime              @db.Date
+  paidDate  DateTime?             @db.Date
+  status    PaymentScheduleStatus @default(PENDING)
+  notes     String?
+  createdAt DateTime              @default(now())
+  updatedAt DateTime              @updatedAt
+
+  invoice SupplierInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@index([dueDate])
+  @@map("payment_schedules")
+}
+
+enum PaymentScheduleStatus {
+  PENDING
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model BankNotice {
+  id              String   @id @default(uuid())
+  invoiceId       String
+  operationNumber String
+  bankReference   String?
+  amountSdg       Decimal  @db.Decimal(18, 2)
+  fileUrl         String?
+  isMatched       Boolean  @default(false)
+  matchedAt       DateTime?
+  matchedById     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  invoice   SupplierInvoice @relation(fields: [invoiceId], references: [id])
+  matchedBy User?           @relation(fields: [matchedById], references: [id])
+
+  @@index([invoiceId])
+  @@index([operationNumber])
+  @@map("bank_notices")
+}
+
+// ==================== SALES ====================
+
+model Customer {
+  id             String       @id @default(uuid())
+  name           String
+  nameAr         String?
+  phone          String?
+  email          String?
+  address        String?
+  customerType   CustomerType @default(RETAIL)
+  creditLimitSdg Decimal      @default(0) @db.Decimal(18, 2)
+  balanceSdg     Decimal      @default(0) @db.Decimal(18, 2)
+  isActive       Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  salesOrders   SalesOrder[]
+  salesInvoices SalesInvoice[]
+
+  @@map("customers")
+}
+
+enum CustomerType {
+  WHOLESALE
+  RETAIL
+}
+
+model SalesOrder {
+  id          String           @id @default(uuid())
+  soNumber    String           @unique
+  customerId  String
+  branchId    String
+  warehouseId String
+  dayCycleId  String
+  orderDate   DateTime         @db.Date
+  totalUsd    Decimal          @db.Decimal(18, 4)
+  totalSdg    Decimal          @db.Decimal(18, 2)
+  status      SalesOrderStatus @default(DRAFT)
+  notes       String?
+  createdById String
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  customer  Customer         @relation(fields: [customerId], references: [id])
+  branch    Branch           @relation(fields: [branchId], references: [id])
+  warehouse Warehouse        @relation(fields: [warehouseId], references: [id])
+  dayCycle  DayCycle         @relation(fields: [dayCycleId], references: [id])
+  createdBy User             @relation(fields: [createdById], references: [id])
+  lines     SalesOrderLine[]
+
+  @@index([customerId])
+  @@index([branchId])
+  @@index([dayCycleId])
+  @@index([status])
+  @@map("sales_orders")
+}
+
+model SalesOrderLine {
+  id           String  @id @default(uuid())
+  salesOrderId String
+  itemId       String
+  qty          Decimal @db.Decimal(18, 4)
+  unitPriceUsd Decimal @db.Decimal(18, 4)
+  unitPriceSdg Decimal @db.Decimal(18, 4)
+  totalUsd     Decimal @db.Decimal(18, 4)
+  totalSdg     Decimal @db.Decimal(18, 2)
+  qtyDelivered Decimal @default(0) @db.Decimal(18, 4)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  salesOrder SalesOrder @relation(fields: [salesOrderId], references: [id], onDelete: Cascade)
+  item       Item       @relation(fields: [itemId], references: [id])
+
+  @@index([salesOrderId])
+  @@map("sales_order_lines")
+}
+
+enum SalesOrderStatus {
+  DRAFT
+  CONFIRMED
+  PARTIALLY_DELIVERED
+  FULLY_DELIVERED
+  INVOICED
+  CANCELLED
+}
+
+model SalesInvoice {
+  id            String             @id @default(uuid())
+  invoiceNumber String             @unique
+  customerId    String?
+  shelfId       String
+  dayCycleId    String
+  invoiceType   SalesInvoiceType
+  invoiceDate   DateTime           @db.Date
+  dueDate       DateTime?          @db.Date
+  totalUsd      Decimal            @db.Decimal(18, 4)
+  totalSdg      Decimal            @db.Decimal(18, 2)
+  paidAmountSdg Decimal?           @db.Decimal(18, 2)
+  status        SalesInvoiceStatus @default(DRAFT)
+  notes         String?
+  createdById   String
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  customer  Customer?          @relation(fields: [customerId], references: [id])
+  shelf     Shelf              @relation(fields: [shelfId], references: [id])
+  dayCycle  DayCycle           @relation(fields: [dayCycleId], references: [id])
+  createdBy User               @relation(fields: [createdById], references: [id])
+  lines     SalesInvoiceLine[]
+
+  @@index([customerId])
+  @@index([shelfId])
+  @@index([dayCycleId])
+  @@index([status])
+  @@index([dueDate])
+  @@map("sales_invoices")
+}
+
+model SalesInvoiceLine {
+  id             String  @id @default(uuid())
+  salesInvoiceId String
+  itemId         String
+  batchId        String
+  qty            Decimal @db.Decimal(18, 4)
+  unitPriceUsd   Decimal @db.Decimal(18, 4)
+  unitPriceSdg   Decimal @db.Decimal(18, 4)
+  unitCostUsd    Decimal @db.Decimal(18, 6)
+  totalUsd       Decimal @db.Decimal(18, 4)
+  totalSdg       Decimal @db.Decimal(18, 2)
+  createdAt      DateTime @default(now())
+
+  salesInvoice SalesInvoice @relation(fields: [salesInvoiceId], references: [id], onDelete: Cascade)
+  item         Item         @relation(fields: [itemId], references: [id])
+  batch        Batch        @relation(fields: [batchId], references: [id])
+
+  @@index([salesInvoiceId])
+  @@map("sales_invoice_lines")
+}
+
+enum SalesInvoiceType {
+  WHOLESALE
+  RETAIL
+  DAILY_AGGREGATE
+}
+
+enum SalesInvoiceStatus {
+  DRAFT
+  ISSUED
+  PARTIALLY_PAID
+  PAID
+  CANCELLED
+}
+
+model DailyAggregateInvoice {
+  id               String   @id @default(uuid())
+  shelfId          String
+  dayCycleId       String
+  invoiceDate      DateTime @db.Date
+  cashTotalSdg     Decimal  @db.Decimal(18, 2)
+  cardTotalSdg     Decimal  @db.Decimal(18, 2)
+  totalSdg         Decimal  @db.Decimal(18, 2)
+  totalUsd         Decimal  @db.Decimal(18, 4)
+  itemCount        Int
+  transactionCount Int
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  shelf    Shelf    @relation(fields: [shelfId], references: [id])
+  dayCycle DayCycle @relation(fields: [dayCycleId], references: [id])
+
+  @@unique([shelfId, dayCycleId])
+  @@index([shelfId])
+  @@index([dayCycleId])
+  @@map("daily_aggregate_invoices")
+}
+
+// ==================== GOODS REQUESTS ====================
+
+model GoodsRequest {
+  id            String             @id @default(uuid())
+  requestNumber String             @unique
+  shelfId       String
+  requestedById String
+  requestDate   DateTime           @db.Date
+  status        GoodsRequestStatus @default(DRAFT)
+  notes         String?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  shelf       Shelf                  @relation(fields: [shelfId], references: [id])
+  requestedBy User                   @relation(fields: [requestedById], references: [id])
+  lines       GoodsRequestLine[]
+  approvals   GoodsRequestApproval[]
+
+  @@index([shelfId])
+  @@index([status])
+  @@map("goods_requests")
+}
+
+model GoodsRequestLine {
+  id           String  @id @default(uuid())
+  requestId    String
+  itemId       String
+  qtyRequested Decimal @db.Decimal(18, 4)
+  qtyApproved  Decimal @default(0) @db.Decimal(18, 4)
+  qtyIssued    Decimal @default(0) @db.Decimal(18, 4)
+  qtyReceived  Decimal @default(0) @db.Decimal(18, 4)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  request GoodsRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  item    Item         @relation(fields: [itemId], references: [id])
+
+  @@index([requestId])
+  @@map("goods_request_lines")
+}
+
+enum GoodsRequestStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+  ISSUED
+  RECEIVED
+  CANCELLED
+}
+
+model GoodsRequestApproval {
+  id         String   @id @default(uuid())
+  requestId  String
+  approvedById String
+  approvedAt DateTime @default(now())
+  notes      String?
+
+  request    GoodsRequest @relation(fields: [requestId], references: [id], onDelete: Cascade)
+  approvedBy User         @relation(fields: [approvedById], references: [id])
+
+  @@index([requestId])
+  @@map("goods_request_approvals")
+}
+
+// ==================== ACCOUNTING ====================
+
+model Account {
+  id          String      @id @default(uuid())
+  code        String      @unique
+  nameEn      String
+  nameAr      String
+  accountType AccountType
+  parentId    String?
+  isActive    Boolean     @default(true)
+  description String?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  parent           Account?       @relation("AccountHierarchy", fields: [parentId], references: [id])
+  children         Account[]      @relation("AccountHierarchy")
+  journalLines     JournalLine[]
+  fromTransactions Transaction[]  @relation("TransactionFrom")
+  toTransactions   Transaction[]  @relation("TransactionTo")
+
+  @@map("accounts")
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+model JournalEntry {
+  id            String   @id @default(uuid())
+  entryNumber   String   @unique
+  dayCycleId    String
+  entryDate     DateTime @db.Date
+  description   String
+  referenceId   String?
+  referenceType String?
+  isPosted      Boolean  @default(false)
+  postedAt      DateTime?
+  postedById    String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  dayCycle DayCycle      @relation(fields: [dayCycleId], references: [id])
+  postedBy User?         @relation(fields: [postedById], references: [id])
+  lines    JournalLine[]
+
+  @@index([dayCycleId])
+  @@index([referenceId, referenceType])
+  @@map("journal_entries")
+}
+
+model JournalLine {
+  id             String  @id @default(uuid())
+  journalEntryId String
+  accountId      String
+  debitUsd       Decimal @default(0) @db.Decimal(18, 4)
+  creditUsd      Decimal @default(0) @db.Decimal(18, 4)
+  debitSdg       Decimal @default(0) @db.Decimal(18, 2)
+  creditSdg      Decimal @default(0) @db.Decimal(18, 2)
+  description    String?
+  createdAt      DateTime @default(now())
+
+  journalEntry JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  account      Account      @relation(fields: [accountId], references: [id])
+
+  @@index([journalEntryId])
+  @@index([accountId])
+  @@map("journal_lines")
+}
+
+model Transaction {
+  id              String          @id @default(uuid())
+  branchId        String
+  dayCycleId      String
+  transactionType TransactionType
+  amountSdg       Decimal         @db.Decimal(18, 2)
+  amountUsd       Decimal         @db.Decimal(18, 4)
+  fromAccountId   String?
+  toAccountId     String?
+  description     String
+  referenceNumber String?
+  receiptImages   String[]        @default([])
+  createdById     String
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  branch      Branch   @relation(fields: [branchId], references: [id])
+  dayCycle    DayCycle @relation(fields: [dayCycleId], references: [id])
+  fromAccount Account? @relation("TransactionFrom", fields: [fromAccountId], references: [id])
+  toAccount   Account? @relation("TransactionTo", fields: [toAccountId], references: [id])
+  createdBy   User     @relation(fields: [createdById], references: [id])
+
+  @@index([branchId])
+  @@index([dayCycleId])
+  @@index([transactionType])
+  @@map("transactions")
+}
+
+enum TransactionType {
+  CASH_IN
+  CASH_OUT
+  BANK_IN
+  BANK_OUT
+  TRANSFER
+  ADJUSTMENT
+}
+
+model ExpenseCategory {
+  id        String   @id @default(uuid())
+  name      String
+  nameAr    String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  expenses Expense[]
+
+  @@map("expense_categories")
+}
+
+model Expense {
+  id           String    @id @default(uuid())
+  branchId     String
+  dayCycleId   String
+  categoryId   String
+  amountSdg    Decimal   @db.Decimal(18, 2)
+  description  String
+  approvedById String?
+  approvedAt   DateTime?
+  createdById  String
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  branch     Branch          @relation(fields: [branchId], references: [id])
+  dayCycle   DayCycle        @relation(fields: [dayCycleId], references: [id])
+  category   ExpenseCategory @relation(fields: [categoryId], references: [id])
+  approvedBy User?           @relation("ExpenseApprovedBy", fields: [approvedById], references: [id])
+  createdBy  User            @relation("ExpenseCreatedBy", fields: [createdById], references: [id])
+
+  @@index([branchId])
+  @@index([dayCycleId])
+  @@index([categoryId])
+  @@map("expenses")
+}
+
+// ==================== AUDIT ====================
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String
+  branchId   String
+  action     String
+  entityType String
+  entityId   String
+  oldData    Json?
+  newData    Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  user   User   @relation(fields: [userId], references: [id])
+  branch Branch @relation(fields: [branchId], references: [id])
+
+  @@index([userId])
+  @@index([branchId])
+  @@index([entityType, entityId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
