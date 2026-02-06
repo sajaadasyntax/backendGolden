@@ -25,13 +25,21 @@ export const middleware = t.middleware;
  * Admins and Managers can access any branch; other roles are restricted to their own.
  */
 export function validateBranchAccess(
-  userBranchId: string,
+  userBranchId: string | null,
   userRole: string,
   requestedBranchId: string
 ): void {
   // ADMIN and MANAGER can access any branch
   if (["ADMIN", "MANAGER"].includes(userRole)) {
     return;
+  }
+  
+  // User without branch can't access branch-specific data
+  if (!userBranchId) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "You must be assigned to a branch to access this resource",
+    });
   }
   
   // Other roles can only access their own branch

@@ -79,15 +79,17 @@ export const authRouter = router({
     await invalidateSession(ctx.user.sessionId);
 
     // Create audit log
-    await ctx.prisma.auditLog.create({
-      data: {
-        userId: ctx.user.userId,
-        branchId: ctx.user.branchId,
-        action: "LOGOUT",
-        entityType: "User",
-        entityId: ctx.user.userId,
-      },
-    });
+    if (ctx.user.branchId) {
+      await ctx.prisma.auditLog.create({
+        data: {
+          userId: ctx.user.userId,
+          branchId: ctx.user.branchId,
+          action: "LOGOUT",
+          entityType: "User",
+          entityId: ctx.user.userId,
+        },
+      });
+    }
 
     return { success: true };
   }),

@@ -210,16 +210,18 @@ export const userRouter = router({
       }
 
       // Audit log
-      await ctx.prisma.auditLog.create({
-        data: {
-          userId: ctx.user.userId,
-          branchId: ctx.user.branchId,
-          action: "CREATE",
-          entityType: "User",
-          entityId: result.user.id,
-          newData: { email: input.email, name: input.name, role: input.role },
-        },
-      });
+      if (ctx.user.branchId) {
+        await ctx.prisma.auditLog.create({
+          data: {
+            userId: ctx.user.userId,
+            branchId: ctx.user.branchId,
+            action: "CREATE",
+            entityType: "User",
+            entityId: result.user.id,
+            newData: { email: input.email, name: input.name, role: input.role },
+          },
+        });
+      }
 
       return {
         id: result.user.id,
@@ -280,17 +282,19 @@ export const userRouter = router({
       });
 
       // Audit log
-      await ctx.prisma.auditLog.create({
-        data: {
-          userId: ctx.user.userId,
-          branchId: ctx.user.branchId,
-          action: "UPDATE",
-          entityType: "User",
-          entityId: id,
-          oldData: { email: existing.email, name: existing.name, role: existing.role },
-          newData: { email: user.email, name: user.name, role: user.role },
-        },
-      });
+      if (ctx.user.branchId) {
+        await ctx.prisma.auditLog.create({
+          data: {
+            userId: ctx.user.userId,
+            branchId: ctx.user.branchId,
+            action: "UPDATE",
+            entityType: "User",
+            entityId: id,
+            oldData: { email: existing.email, name: existing.name, role: existing.role },
+            newData: { email: user.email, name: user.name, role: user.role },
+          },
+        });
+      }
 
       return {
         id: user.id,
@@ -335,16 +339,18 @@ export const userRouter = router({
       });
 
       // Audit log
-      await ctx.prisma.auditLog.create({
-        data: {
-          userId: ctx.user.userId,
-          branchId: ctx.user.branchId,
-          action: "UPDATE",
-          entityType: "User",
-          entityId: input.userId,
-          newData: { passwordReset: true },
-        },
-      });
+      if (ctx.user.branchId) {
+        await ctx.prisma.auditLog.create({
+          data: {
+            userId: ctx.user.userId,
+            branchId: ctx.user.branchId,
+            action: "UPDATE",
+            entityType: "User",
+            entityId: input.userId,
+            newData: { passwordReset: true },
+          },
+        });
+      }
 
       return { success: true };
     }),

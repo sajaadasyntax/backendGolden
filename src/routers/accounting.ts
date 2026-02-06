@@ -142,6 +142,10 @@ export const accountingRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        if (!ctx.user.branchId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "User must be assigned to a branch" });
+        }
+
         // Get open day cycle (auto-closes previous days)
         const dayCycle = await getOpenDayCycle(ctx.user.branchId);
 
@@ -159,7 +163,7 @@ export const accountingRouter = router({
           // Create the transaction
           const transaction = await tx.transaction.create({
             data: {
-              branchId: ctx.user.branchId,
+              branchId: ctx.user.branchId!,  // Already checked above
               dayCycleId: dayCycle.id,
               transactionType: input.transactionType,
               amountSdg: input.amountSdg,
@@ -345,6 +349,10 @@ export const accountingRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        if (!ctx.user.branchId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "User must be assigned to a branch" });
+        }
+
         // Get open day cycle (auto-closes previous days)
         const dayCycle = await getOpenDayCycle(ctx.user.branchId);
 
@@ -589,6 +597,11 @@ export const accountingRouter = router({
       .query(async ({ ctx, input }) => {
         // Determine which branch to query - user's branch by default, or specified if admin/manager
         const branchId = input.branchId || ctx.user.branchId;
+        
+        if (!branchId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Branch ID is required" });
+        }
+        
         validateBranchAccess(ctx.user.branchId, ctx.user.role, branchId);
         
         // Filter by branch through purchase order relation
@@ -645,6 +658,11 @@ export const accountingRouter = router({
       .query(async ({ ctx, input }) => {
         // Determine which branch to query - user's branch by default, or specified if admin/manager
         const branchId = input.branchId || ctx.user.branchId;
+        
+        if (!branchId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Branch ID is required" });
+        }
+        
         validateBranchAccess(ctx.user.branchId, ctx.user.role, branchId);
         
         // Get all outstanding invoices - filter by branch through shelf.user.branchId
@@ -1201,7 +1219,7 @@ export const accountingRouter = router({
         const { supplierId, page, pageSize } = input;
         
         const where = {
-          status: { in: ['OUTSTANDING', 'SCHEDULED'] as const satisfies readonly ['OUTSTANDING', 'SCHEDULED'] },
+          status: { in: ['OUTSTANDING', 'SCHEDULED'] as ['OUTSTANDING', 'SCHEDULED'] },
           ...(supplierId && { supplierId }),
         };
         
