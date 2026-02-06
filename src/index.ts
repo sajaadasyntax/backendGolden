@@ -12,8 +12,11 @@ const PORT = process.env.PORT || 4000;
 
 // Middleware
 // Allow multiple origins for web and mobile
+const isProduction = process.env.NODE_ENV === 'production';
 const allowedOrigins = [
   process.env.FRONTEND_URL || "http://localhost:3000",
+  process.env.API_URL || "https://api.alzahaby.cloud",
+  "https://api.alzahaby.cloud",
   "http://localhost:3000",
   "http://localhost:8081", // Expo web
   "exp://localhost:8081", // Expo Go
@@ -26,21 +29,26 @@ app.use(cors({
     // Allow requests with no origin (mobile apps, Postman, etc.)
     if (!origin) return callback(null, true);
     
-    // Check if origin matches allowed patterns
-    const isAllowed = allowedOrigins.some(allowed => {
-      if (typeof allowed === 'string') {
-        return origin === allowed;
+    // In production, enforce CORS strictly
+    if (isProduction) {
+      const isAllowed = allowedOrigins.some(allowed => {
+        if (typeof allowed === 'string') {
+          return origin === allowed;
+        }
+        if (allowed instanceof RegExp) {
+          return allowed.test(origin);
+        }
+        return false;
+      });
+      
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        callback(new Error('Not allowed by CORS'));
       }
-      if (allowed instanceof RegExp) {
-        return allowed.test(origin);
-      }
-      return false;
-    });
-    
-    if (isAllowed) {
-      callback(null, true);
     } else {
-      callback(null, true); // Allow all for development
+      // In development, allow all origins
+      callback(null, true);
     }
   },
   credentials: true,

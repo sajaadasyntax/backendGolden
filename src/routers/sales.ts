@@ -220,7 +220,7 @@ export const salesRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        // Get warehouse to find branch
+        // Get warehouse
         const warehouse = await ctx.prisma.warehouse.findUnique({
           where: { id: input.warehouseId },
         });
@@ -232,8 +232,15 @@ export const salesRouter = router({
           });
         }
 
+        if (!ctx.user.branchId) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "User must be assigned to a branch",
+          });
+        }
+
         // Get open day cycle (auto-closes previous days)
-        const dayCycle = await getOpenDayCycle(warehouse.branchId);
+        const dayCycle = await getOpenDayCycle(ctx.user.branchId);
 
         if (!dayCycle) {
           throw new TRPCError({
@@ -248,7 +255,7 @@ export const salesRouter = router({
 
         // Generate SO number
         const count = await ctx.prisma.salesOrder.count({
-          where: { branchId: warehouse.branchId },
+          where: { branchId: ctx.user.branchId },
         });
         const soNumber = `SO-${String(count + 1).padStart(6, "0")}`;
 
@@ -263,7 +270,7 @@ export const salesRouter = router({
           data: {
             soNumber,
             customerId: input.customerId,
-            branchId: warehouse.branchId,
+            branchId: ctx.user.branchId,
             warehouseId: input.warehouseId,
             dayCycleId: dayCycle.id,
             orderDate: today,
@@ -610,7 +617,7 @@ export const salesRouter = router({
           where: { id: input.id },
           include: {
             customer: true,
-            shelf: { include: { branch: true } },
+            shelf: { include: { user: { select: { branchId: true, branch: true } } } },
             dayCycle: true,
             createdBy: { select: { id: true, name: true } },
             lines: { include: { item: { include: { unit: true } }, batch: true } },
@@ -646,9 +653,10 @@ export const salesRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        // Get shelf to find branch
+        // Get shelf with user to find branch
         const shelf = await ctx.prisma.shelf.findUnique({
           where: { id: input.shelfId },
+          include: { user: { select: { branchId: true } } },
         });
 
         if (!shelf) {
@@ -658,8 +666,15 @@ export const salesRouter = router({
           });
         }
 
+        if (!shelf.user?.branchId) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Shelf must be assigned to a user with a branch",
+          });
+        }
+
         // Get open day cycle (auto-closes previous days)
-        const dayCycle = await getOpenDayCycle(shelf.branchId);
+        const dayCycle = await getOpenDayCycle(shelf.user.branchId);
 
         if (!dayCycle) {
           throw new TRPCError({
@@ -678,7 +693,7 @@ export const salesRouter = router({
           const policy = await ctx.prisma.pricePolicy.findFirst({
             where: {
               itemId: line.itemId,
-              branchId: shelf.branchId,
+              branchId: shelf.user.branchId,
               effectiveFrom: { lte: today },
               OR: [{ effectiveTo: null }, { effectiveTo: { gte: today } }],
             },
@@ -896,6 +911,7 @@ export const salesRouter = router({
       .query(async ({ ctx, input }) => {
         const shelf = await ctx.prisma.shelf.findUnique({
           where: { id: input.shelfId },
+          include: { user: { select: { branchId: true } } },
         });
 
         if (!shelf) {
@@ -905,8 +921,15 @@ export const salesRouter = router({
           });
         }
 
+        if (!shelf.user?.branchId) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Shelf must be assigned to a user with a branch",
+          });
+        }
+
         // Get open day cycle (auto-closes previous days)
-        const dayCycle = await getOpenDayCycle(shelf.branchId);
+        const dayCycle = await getOpenDayCycle(shelf.user.branchId);
 
         if (!dayCycle) {
           throw new TRPCError({
@@ -957,6 +980,7 @@ export const salesRouter = router({
       .mutation(async ({ ctx, input }) => {
         const shelf = await ctx.prisma.shelf.findUnique({
           where: { id: input.shelfId },
+          include: { user: { select: { branchId: true } } },
         });
 
         if (!shelf) {
@@ -966,8 +990,15 @@ export const salesRouter = router({
           });
         }
 
+        if (!shelf.user?.branchId) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Shelf must be assigned to a user with a branch",
+          });
+        }
+
         // Get open day cycle (auto-closes previous days)
-        const dayCycle = await getOpenDayCycle(shelf.branchId);
+        const dayCycle = await getOpenDayCycle(shelf.user.branchId);
 
         if (!dayCycle) {
           throw new TRPCError({
@@ -1039,7 +1070,7 @@ export const salesRouter = router({
 
         const where = {
           ...(shelfId && { shelfId }),
-          ...(branchId && { shelf: { branchId } }),
+          ...(branchId && { shelf: { user: { branchId } } }),
           ...(status && { status }),
         };
 

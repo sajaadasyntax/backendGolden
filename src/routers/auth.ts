@@ -47,15 +47,17 @@ export const authRouter = router({
       );
 
       // Create audit log
-      await ctx.prisma.auditLog.create({
-        data: {
-          userId: user.id,
-          branchId: user.branchId,
-          action: "LOGIN",
-          entityType: "User",
-          entityId: user.id,
-        },
-      });
+      if (user.branchId) {
+        await ctx.prisma.auditLog.create({
+          data: {
+            userId: user.id,
+            branchId: user.branchId,
+            action: "LOGIN",
+            entityType: "User",
+            entityId: user.id,
+          },
+        });
+      }
 
       return {
         user: {
@@ -93,7 +95,7 @@ export const authRouter = router({
   me: protectedProcedure.query(async ({ ctx }) => {
     const user = await ctx.prisma.user.findUnique({
       where: { id: ctx.user.userId },
-      include: { branch: true },
+      include: { branch: true, shelf: { where: { isActive: true } } },
     });
 
     if (!user) {

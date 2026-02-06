@@ -19,7 +19,7 @@ export interface JWTPayload {
   userId: string;
   email: string;
   role: string;
-  branchId: string;
+  branchId: string | null;
   sessionId: string;
 }
 

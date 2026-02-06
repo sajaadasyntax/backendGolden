@@ -1201,7 +1201,7 @@ export const accountingRouter = router({
         const { supplierId, page, pageSize } = input;
         
         const where = {
-          status: { in: ['OUTSTANDING', 'SCHEDULED'] as const },
+          status: { in: ['OUTSTANDING', 'SCHEDULED'] as const satisfies readonly ['OUTSTANDING', 'SCHEDULED'] },
           ...(supplierId && { supplierId }),
         };
         

@@ -111,13 +111,7 @@ export const userRouter = router({
       })
     )
     .mutation(async ({ ctx, input }) => {
-      // Additional check to prevent ADMIN creation
-      if (input.role === "ADMIN") {
-        throw new TRPCError({
-          code: "FORBIDDEN",
-          message: "Cannot create ADMIN users",
-        });
-      }
+      // Note: ADMIN role is already prevented by the refine() in the input schema
       // Check if email exists
       const existing = await ctx.prisma.user.findUnique({
         where: { email: input.email },

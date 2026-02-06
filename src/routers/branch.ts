@@ -17,8 +17,6 @@ export const branchRouter = router({
       const branch = await ctx.prisma.branch.findUnique({
         where: { id: input.id },
         include: {
-          warehouses: { where: { isActive: true } },
-          shelves: { where: { isActive: true } },
           _count: {
             select: {
               users: true,

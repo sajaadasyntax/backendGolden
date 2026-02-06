@@ -247,7 +247,7 @@ export const dayCycleRouter = router({
           }),
           ctx.prisma.goodsRequest.count({
             where: {
-              shelf: { branchId: dayCycle.branchId },
+              shelf: { user: { branchId: dayCycle.branchId } },
               status: { in: ["DRAFT", "SUBMITTED", "APPROVED"] },
             },
           }),
