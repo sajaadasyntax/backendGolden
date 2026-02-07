@@ -8,7 +8,7 @@ import { prisma } from "./lib/prisma.js";
 import { autoClosePreviousDayCycles } from "./lib/dayCycle.js";
 
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 3000;
 
 // Middleware
 // Allow multiple origins for web and mobile
