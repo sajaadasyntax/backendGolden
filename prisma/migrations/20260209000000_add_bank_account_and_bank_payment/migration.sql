@@ -41,7 +41,7 @@ CREATE INDEX "bank_payments_bankAccountId_idx" ON "bank_payments"("bankAccountId
 CREATE INDEX "bank_payments_transactionId_idx" ON "bank_payments"("transactionId");
 
 -- AddForeignKey
-ALTER TABLE "bank_payments" ADD CONSTRAINT "bank_payments_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "bank_payments" ADD CONSTRAINT "bank_payments_userId_fkey" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
-ALTER TABLE "bank_payments" ADD CONSTRAINT "bank_payments_bankAccountId_fkey" FOREIGN KEY ("bankAccountId") REFERENCES "bank_accounts"("id") ON RESTRICT ON UPDATE CASCADE;
+ALTER TABLE "bank_payments" ADD CONSTRAINT "bank_payments_bankAccountId_fkey" FOREIGN KEY ("bankAccountId") REFERENCES "bank_accounts"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
