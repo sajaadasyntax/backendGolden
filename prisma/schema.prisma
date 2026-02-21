@@ -64,6 +64,7 @@ model User {
   approvedExpenses       Expense[]                @relation("ExpenseApprovedBy")
   auditLogs              AuditLog[]
   shelf                  Shelf[]                  // User's assigned shelf
+  bankPayments           BankPayment[]
 
   @@index([branchId])
   @@index([email])
@@ -922,6 +923,50 @@ model Expense {
   @@index([dayCycleId])
   @@index([categoryId])
   @@map("expenses")
+}
+
+// ==================== BANK PAYMENTS ====================
+
+model BankAccount {
+  id            String   @id @default(uuid())
+  bankName      String
+  bankNameAr    String?
+  accountNumber String
+  iban          String?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  payments BankPayment[]
+
+  @@map("bank_accounts")
+}
+
+model BankPayment {
+  id              String            @id @default(uuid())
+  userId          String
+  bankAccountId   String
+  amountSdg       Decimal           @db.Decimal(18, 2)
+  transactionId   String?
+  receiptImageUrl String
+  description     String?
+  status          BankPaymentStatus @default(PENDING)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  user        User        @relation(fields: [userId], references: [id])
+  bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
+
+  @@index([userId])
+  @@index([bankAccountId])
+  @@index([transactionId])
+  @@map("bank_payments")
+}
+
+enum BankPaymentStatus {
+  PENDING
+  APPROVED
+  REJECTED
 }
 
 // ==================== AUDIT ====================

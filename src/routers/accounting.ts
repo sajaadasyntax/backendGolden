@@ -779,6 +779,83 @@ export const accountingRouter = router({
         };
       }),
 
+    userSalesProfit: adminProcedure
+      .input(
+        z.object({
+          dateFrom: z.coerce.date().optional(),
+          dateTo: z.coerce.date().optional(),
+          userId: z.string().uuid().optional(),
+        })
+      )
+      .query(async ({ ctx, input }) => {
+        const { dateFrom, dateTo, userId } = input;
+
+        const whereInvoice: any = {};
+        if (dateFrom) whereInvoice.invoiceDate = { ...(whereInvoice.invoiceDate || {}), gte: dateFrom };
+        if (dateTo) whereInvoice.invoiceDate = { ...(whereInvoice.invoiceDate || {}), lte: dateTo };
+        if (userId) whereInvoice.createdById = userId;
+
+        const invoices = await ctx.prisma.salesInvoice.findMany({
+          where: whereInvoice,
+          include: {
+            createdBy: { select: { id: true, name: true, nameAr: true, email: true } },
+            lines: true,
+          },
+        });
+
+        const userMap = new Map<string, {
+          user: { id: string; name: string; nameAr: string | null; email: string };
+          totalSalesUsd: number;
+          totalSalesSdg: number;
+          totalCOGS: number;
+          grossProfit: number;
+          invoiceCount: number;
+          itemsSold: number;
+        }>();
+
+        for (const inv of invoices) {
+          const uid = inv.createdById;
+          if (!userMap.has(uid)) {
+            userMap.set(uid, {
+              user: inv.createdBy,
+              totalSalesUsd: 0,
+              totalSalesSdg: 0,
+              totalCOGS: 0,
+              grossProfit: 0,
+              invoiceCount: 0,
+              itemsSold: 0,
+            });
+          }
+          const entry = userMap.get(uid)!;
+          entry.invoiceCount++;
+          entry.totalSalesUsd += Number(inv.totalUsd);
+          entry.totalSalesSdg += Number(inv.totalSdg);
+          for (const line of inv.lines) {
+            const qty = Number(line.qty);
+            const revenue = Number(line.unitPriceUsd) * qty;
+            const cost = Number(line.unitCostUsd) * qty;
+            entry.totalCOGS += cost;
+            entry.grossProfit += revenue - cost;
+            entry.itemsSold += qty;
+          }
+        }
+
+        const results = Array.from(userMap.values()).sort((a, b) => b.grossProfit - a.grossProfit);
+        const totalRevenue = results.reduce((s, r) => s + r.totalSalesUsd, 0);
+        const totalCOGS = results.reduce((s, r) => s + r.totalCOGS, 0);
+        const totalProfit = results.reduce((s, r) => s + r.grossProfit, 0);
+
+        return {
+          users: results,
+          summary: {
+            totalRevenue,
+            totalCOGS,
+            totalProfit,
+            profitMargin: totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0,
+          },
+        };
+      }),
+
     dashboard: protectedProcedure
       .input(z.object({ branchId: z.string().uuid() }))
       .query(async ({ ctx, input }) => {
@@ -1412,6 +1489,151 @@ export const accountingRouter = router({
         }
 
         return invoice;
+      }),
+  }),
+
+  // ==================== BANK ACCOUNTS ====================
+  bankAccounts: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      return ctx.prisma.bankAccount.findMany({
+        where: { isActive: true },
+        orderBy: { bankName: "asc" },
+      });
+    }),
+
+    create: adminProcedure
+      .input(
+        z.object({
+          bankName: z.string().min(2),
+          bankNameAr: z.string().optional(),
+          accountNumber: z.string().min(1),
+          iban: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        return ctx.prisma.bankAccount.create({ data: input });
+      }),
+
+    update: adminProcedure
+      .input(
+        z.object({
+          id: z.string().uuid(),
+          bankName: z.string().min(2).optional(),
+          bankNameAr: z.string().optional(),
+          accountNumber: z.string().min(1).optional(),
+          iban: z.string().optional(),
+          isActive: z.boolean().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { id, ...data } = input;
+        return ctx.prisma.bankAccount.update({ where: { id }, data });
+      }),
+
+    delete: adminProcedure
+      .input(z.object({ id: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        return ctx.prisma.bankAccount.update({
+          where: { id: input.id },
+          data: { isActive: false },
+        });
+      }),
+  }),
+
+  // ==================== BANK PAYMENTS ====================
+  bankPayments: router({
+    submit: protectedProcedure
+      .input(
+        z.object({
+          bankAccountId: z.string().uuid(),
+          amountSdg: z.number().positive(),
+          transactionId: z.string().optional(),
+          receiptImageUrl: z.string().min(1),
+          description: z.string().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (input.transactionId) {
+          const existing = await ctx.prisma.bankPayment.findFirst({
+            where: { transactionId: input.transactionId },
+          });
+          if (existing) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: "A payment with this transaction ID already exists",
+            });
+          }
+        }
+
+        return ctx.prisma.bankPayment.create({
+          data: {
+            userId: ctx.user.userId,
+            bankAccountId: input.bankAccountId,
+            amountSdg: input.amountSdg,
+            transactionId: input.transactionId,
+            receiptImageUrl: input.receiptImageUrl,
+            description: input.description,
+          },
+          include: { bankAccount: true, user: { select: { id: true, name: true } } },
+        });
+      }),
+
+    list: adminProcedure
+      .input(
+        z.object({
+          status: z.enum(["PENDING", "APPROVED", "REJECTED"]).optional(),
+          userId: z.string().uuid().optional(),
+          bankAccountId: z.string().uuid().optional(),
+          startDate: z.coerce.date().optional(),
+          endDate: z.coerce.date().optional(),
+          page: z.number().int().positive().default(1),
+          pageSize: z.number().int().positive().max(100).default(20),
+        })
+      )
+      .query(async ({ ctx, input }) => {
+        const { status, userId, bankAccountId, startDate, endDate, page, pageSize } = input;
+
+        const where: any = {
+          ...(status && { status }),
+          ...(userId && { userId }),
+          ...(bankAccountId && { bankAccountId }),
+        };
+        if (startDate || endDate) {
+          where.createdAt = {};
+          if (startDate) where.createdAt.gte = startDate;
+          if (endDate) where.createdAt.lte = endDate;
+        }
+
+        const [payments, total] = await Promise.all([
+          ctx.prisma.bankPayment.findMany({
+            where,
+            include: {
+              user: { select: { id: true, name: true, email: true } },
+              bankAccount: true,
+            },
+            skip: (page - 1) * pageSize,
+            take: pageSize,
+            orderBy: { createdAt: "desc" },
+          }),
+          ctx.prisma.bankPayment.count({ where }),
+        ]);
+
+        return { data: payments, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+      }),
+
+    updateStatus: adminProcedure
+      .input(
+        z.object({
+          id: z.string().uuid(),
+          status: z.enum(["APPROVED", "REJECTED"]),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        return ctx.prisma.bankPayment.update({
+          where: { id: input.id },
+          data: { status: input.status },
+          include: { bankAccount: true, user: { select: { id: true, name: true } } },
+        });
       }),
   }),
 

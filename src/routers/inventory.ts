@@ -358,16 +358,7 @@ export const inventoryRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        // Extract username from email (part before @)
-        const username = ctx.user.email.split('@')[0];
-        
-        return ctx.prisma.warehouse.create({ 
-          data: {
-            ...input,
-            name: username,
-            nameAr: username,
-          }
-        });
+        return ctx.prisma.warehouse.create({ data: input });
       }),
 
     update: adminProcedure
@@ -405,16 +396,7 @@ export const inventoryRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        // Extract username from email (part before @)
-        const username = ctx.user.email.split('@')[0];
-        
-        return ctx.prisma.shelf.create({ 
-          data: {
-            ...input,
-            name: username,
-            nameAr: username,
-          }
-        });
+        return ctx.prisma.shelf.create({ data: input });
       }),
 
     update: adminProcedure

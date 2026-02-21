@@ -73,7 +73,8 @@ async function main() {
 
   console.log("✓ Created warehouse:", warehouse.name);
 
-  // Create shelf
+  // Create shelf and link to shelf user
+  const shelfUser = await prisma.user.findUnique({ where: { email: "shelf@golden.com" } });
   const shelf = await prisma.shelf.upsert({
     where: { code: "SH01" },
     update: {},
@@ -81,6 +82,7 @@ async function main() {
       name: "Main Shelf",
       nameAr: "الرف الرئيسي",
       code: "SH01",
+      ...(shelfUser ? { userId: shelfUser.id } : {}),
     },
   });
 

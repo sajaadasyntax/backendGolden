@@ -40,7 +40,7 @@ export const userRouter = router({
       const [users, total] = await Promise.all([
         ctx.prisma.user.findMany({
           where,
-          include: { branch: true },
+          include: { branch: true, shelf: { where: { isActive: true }, take: 1 } },
           skip: (page - 1) * pageSize,
           take: pageSize,
           orderBy: { createdAt: "desc" },
@@ -57,6 +57,7 @@ export const userRouter = router({
           role: u.role,
           branchId: u.branchId,
           branch: u.branch,
+          shelf: (u as any).shelf?.[0] || null,
           isActive: u.isActive,
           lastLoginAt: u.lastLoginAt,
           createdAt: u.createdAt,
@@ -73,7 +74,7 @@ export const userRouter = router({
     .query(async ({ ctx, input }) => {
       const user = await ctx.prisma.user.findUnique({
         where: { id: input.id },
-        include: { branch: true },
+        include: { branch: true, shelf: { where: { isActive: true }, take: 1 } },
       });
 
       if (!user) {
@@ -91,6 +92,7 @@ export const userRouter = router({
         role: user.role,
         branchId: user.branchId,
         branch: user.branch,
+        shelf: (user as any).shelf?.[0] || null,
         isActive: user.isActive,
         lastLoginAt: user.lastLoginAt,
         createdAt: user.createdAt,

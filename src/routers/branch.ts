@@ -60,15 +60,8 @@ export const branchRouter = router({
         });
       }
 
-      // Extract username from email (part before @)
-      const username = ctx.user.email.split('@')[0];
-
       const branch = await ctx.prisma.branch.create({
-        data: {
-          ...input,
-          name: username,
-          nameAr: username,
-        },
+        data: input,
       });
 
       // Audit log
