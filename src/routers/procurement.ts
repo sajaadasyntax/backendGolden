@@ -698,6 +698,20 @@ export const procurementRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        let branchId = ctx.user.branchId;
+        if (!branchId && input.purchaseOrderId) {
+          const po = await ctx.prisma.purchaseOrder.findUnique({
+            where: { id: input.purchaseOrderId },
+            select: { branchId: true },
+          });
+          branchId = po?.branchId || null;
+        }
+        if (branchId) {
+          const openCycle = await getOpenDayCycle(branchId);
+          if (!openCycle) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before creating a supplier invoice." });
+          }
+        }
         const { status, ...data } = input;
         return ctx.prisma.supplierInvoice.create({
           data: {
@@ -821,21 +835,19 @@ export const procurementRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const invoice = await ctx.prisma.supplierInvoice.findUnique({
+          where: { id: input.invoiceId },
+          include: { purchaseOrder: { select: { branchId: true } } },
+        });
+        const branchId = ctx.user.branchId || invoice?.purchaseOrder?.branchId;
+        if (branchId) {
+          const openCycle = await getOpenDayCycle(branchId);
+          if (!openCycle) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before adding a bank notice." });
+          }
+        }
         return ctx.prisma.bankNotice.create({
           data: input,
-        });
-      }),
-
-    matchBankNotice: procurementProcedure
-      .input(z.object({ noticeId: z.string().uuid() }))
-      .mutation(async ({ ctx, input }) => {
-        return ctx.prisma.bankNotice.update({
-          where: { id: input.noticeId },
-          data: {
-            isMatched: true,
-            matchedAt: new Date(),
-            matchedById: ctx.user.userId,
-          },
         });
       }),
 

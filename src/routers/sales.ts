@@ -629,7 +629,7 @@ export const salesRouter = router({
           where: { id: input.id },
           include: {
             customer: true,
-            shelf: { include: { user: { select: { branchId: true, branch: true } } } },
+            shelf: { include: { user: { select: { id: true, branchId: true, branch: true } } } },
             dayCycle: true,
             createdBy: { select: { id: true, name: true } },
             lines: { include: { item: { include: { unit: true } }, batch: true } },
@@ -641,6 +641,15 @@ export const salesRouter = router({
             code: "NOT_FOUND",
             message: "Invoice not found",
           });
+        }
+
+        // Non-admin users can only view invoices from their own branch
+        const isAdmin = ["ADMIN", "MANAGER", "ACCOUNTANT"].includes(ctx.user.role);
+        if (!isAdmin && ctx.user.branchId) {
+          const invoiceBranchId = invoice.shelf?.user?.branchId;
+          if (invoiceBranchId && invoiceBranchId !== ctx.user.branchId) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "You do not have access to this invoice" });
+          }
         }
 
         return invoice;

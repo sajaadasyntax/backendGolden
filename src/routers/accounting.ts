@@ -240,6 +240,10 @@ export const accountingRouter = router({
           }
 
           // Create journal entry with lines
+          if (!debitAccountId || !creditAccountId) {
+            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Required accounts not found in chart of accounts. Please configure fromAccountId and toAccountId." });
+          }
+
           if (debitAccountId && creditAccountId) {
             const journalEntry = await tx.journalEntry.create({
               data: {
@@ -386,30 +390,32 @@ export const accountingRouter = router({
             where: { code: isBankPayment ? "1100" : "1000", isActive: true },
           });
 
-          if (expenseAccount && creditAccount) {
-            const entryCount = await tx.journalEntry.count({ where: { dayCycleId: dayCycle.id } });
-            const entryNumber = `JE-EXP-${dayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
-
-            await tx.journalEntry.create({
-              data: {
-                entryNumber,
-                dayCycleId: dayCycle.id,
-                entryDate: new Date(),
-                description: `Expense: ${input.description}`,
-                referenceId: expense.id,
-                referenceType: "Expense",
-                isPosted: true,
-                postedAt: new Date(),
-                postedById: ctx.user.userId,
-                lines: {
-                  create: [
-                    { accountId: expenseAccount.id, debitSdg: input.amountSdg, debitUsd: amountUsd, creditSdg: 0, creditUsd: 0, description: `Expense: ${input.description}` },
-                    { accountId: creditAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: input.amountSdg, creditUsd: amountUsd, description: `Expense payment: ${input.description}` },
-                  ],
-                },
-              },
-            });
+          if (!expenseAccount || !creditAccount) {
+            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Required accounts (Expense / Cash / Bank) not found in chart of accounts" });
           }
+
+          const entryCount = await tx.journalEntry.count({ where: { dayCycleId: dayCycle.id } });
+          const entryNumber = `JE-EXP-${dayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
+
+          await tx.journalEntry.create({
+            data: {
+              entryNumber,
+              dayCycleId: dayCycle.id,
+              entryDate: new Date(),
+              description: `Expense: ${input.description}`,
+              referenceId: expense.id,
+              referenceType: "Expense",
+              isPosted: true,
+              postedAt: new Date(),
+              postedById: ctx.user.userId,
+              lines: {
+                create: [
+                  { accountId: expenseAccount.id, debitSdg: input.amountSdg, debitUsd: amountUsd, creditSdg: 0, creditUsd: 0, description: `Expense: ${input.description}` },
+                  { accountId: creditAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: input.amountSdg, creditUsd: amountUsd, description: `Expense payment: ${input.description}` },
+                ],
+              },
+            },
+          });
 
           // For bank payments, create a Transaction record so it shows in the bank tab
           if (isBankPayment) {
@@ -434,6 +440,9 @@ export const accountingRouter = router({
     approve: adminProcedure
       .input(z.object({ id: z.string().uuid() }))
       .mutation(async ({ ctx, input }) => {
+        const expense = await ctx.prisma.expense.findUnique({ where: { id: input.id } });
+        if (!expense) throw new TRPCError({ code: "NOT_FOUND", message: "Expense not found" });
+        validateBranchAccess(ctx.user.branchId, ctx.user.role, expense.branchId);
         return ctx.prisma.expense.update({
           where: { id: input.id },
           data: { approvedById: ctx.user.userId, approvedAt: new Date() },
@@ -673,11 +682,6 @@ export const accountingRouter = router({
           const paidAmount = Number(inv.paidAmountSdg || 0);
           const remaining = totalAmount - paidAmount;
           
-          // Debug logging for invoices with 0 remaining
-          if (remaining <= 0 && totalAmount > 0) {
-            console.log(`Invoice ${inv.invoiceNumber} has 0 remaining: total=${totalAmount}, paid=${paidAmount}`);
-          }
-          
           return sum + (remaining > 0 ? remaining : 0);
         }, 0);
 
@@ -696,7 +700,6 @@ export const accountingRouter = router({
           else aging.over90 += amount;
         }
 
-        console.log(`Outstanding Payables: Found ${invoices.length} invoices, Total: ${totalOutstanding} SDG`);
         return { invoices, totalPayables: totalOutstanding, totalOutstanding, aging };
       }),
 
@@ -746,16 +749,9 @@ export const accountingRouter = router({
           const totalAmount = Number(inv.totalSdg || 0);
           const paidAmount = Number(inv.paidAmountSdg || 0);
           const remaining = totalAmount - paidAmount;
-          
-          // Debug logging for invoices with 0 remaining
-          if (remaining <= 0 && totalAmount > 0) {
-            console.log(`Invoice ${inv.invoiceNumber} has 0 remaining: total=${totalAmount}, paid=${paidAmount}`);
-          }
-          
           return sum + (remaining > 0 ? remaining : 0);
         }, 0);
 
-        console.log(`Outstanding Receivables: Found ${invoices.length} invoices, Total: ${totalReceivables} SDG`);
         return { invoices, totalReceivables };
       }),
 
@@ -785,6 +781,7 @@ export const accountingRouter = router({
                 journalEntry: {
                   isPosted: true,
                   entryDate: { lte: asOfDate },
+                  dayCycle: { branchId: input.branchId },
                 },
               },
               _sum: { debitSdg: true, creditSdg: true, debitUsd: true, creditUsd: true },
@@ -835,15 +832,18 @@ export const accountingRouter = router({
           dateFrom: z.coerce.date().optional(),
           dateTo: z.coerce.date().optional(),
           userId: z.string().uuid().optional(),
+          branchId: z.string().uuid().optional(),
         })
       )
       .query(async ({ ctx, input }) => {
-        const { dateFrom, dateTo, userId } = input;
+        const { dateFrom, dateTo, userId, branchId } = input;
+        const effectiveBranchId = branchId || ctx.user.branchId;
 
         const whereInvoice: any = {};
         if (dateFrom) whereInvoice.invoiceDate = { ...(whereInvoice.invoiceDate || {}), gte: dateFrom };
         if (dateTo) whereInvoice.invoiceDate = { ...(whereInvoice.invoiceDate || {}), lte: dateTo };
         if (userId) whereInvoice.createdById = userId;
+        if (effectiveBranchId) whereInvoice.shelf = { user: { branchId: effectiveBranchId } };
 
         const invoices = await ctx.prisma.salesInvoice.findMany({
           where: whereInvoice,
@@ -919,10 +919,27 @@ export const accountingRouter = router({
           where: { branchId: input.branchId, cycleDate: today },
         });
 
-        const [pendingOrders, pendingRequests, lowStockItems, todaySales, todayExpenses, outstandingPayables, outstandingReceivables] = await Promise.all([
+        // Count items actually below minimum stock level
+        const allItemsWithMin = await ctx.prisma.item.findMany({
+          where: { isActive: true, minStockLevel: { not: null } },
+          select: { id: true, minStockLevel: true },
+        });
+        const lowStockCount = await (async () => {
+          let count = 0;
+          for (const item of allItemsWithMin) {
+            const batchAgg = await ctx.prisma.batch.aggregate({
+              where: { itemId: item.id, qtyRemaining: { gt: 0 } },
+              _sum: { qtyRemaining: true },
+            });
+            const totalQty = Number(batchAgg._sum.qtyRemaining || 0);
+            if (totalQty <= Number(item.minStockLevel)) count++;
+          }
+          return count;
+        })();
+
+        const [pendingOrders, pendingRequests, todaySales, todayExpenses, outstandingPayables, outstandingReceivables] = await Promise.all([
           ctx.prisma.salesOrder.count({ where: { branchId: input.branchId, status: "DRAFT" } }),
           ctx.prisma.goodsRequest.count({ where: { status: "SUBMITTED" } }),
-          ctx.prisma.item.count({ where: { isActive: true, minStockLevel: { not: null } } }), // Simplified
           dayCycle
             ? ctx.prisma.salesInvoice.aggregate({
                 where: { dayCycleId: dayCycle.id },
@@ -955,7 +972,7 @@ export const accountingRouter = router({
           dayCycle,
           pendingOrders,
           pendingRequests,
-          lowStockItems,
+          lowStockItems: lowStockCount,
           todaySales: Number(todaySales._sum.totalSdg || 0),
           todayExpenses: Number(todayExpenses._sum.amountSdg || 0),
           outstandingPayables: Number(outstandingPayables._sum?.totalSdg || 0),
@@ -1092,6 +1109,7 @@ export const accountingRouter = router({
         z.object({
           status: z.enum(["PENDING", "PAID", "OVERDUE", "CANCELLED"]).optional(),
           supplierId: z.string().uuid().optional(),
+          branchId: z.string().uuid().optional(),
           startDate: z.coerce.date().optional(),
           endDate: z.coerce.date().optional(),
           page: z.number().int().positive().default(1),
@@ -1099,16 +1117,18 @@ export const accountingRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const { status, supplierId, startDate, endDate, page, pageSize } = input;
+        const { status, supplierId, branchId, startDate, endDate, page, pageSize } = input;
+        const effectiveBranchId = branchId || ctx.user.branchId;
         
         const where: any = {
           ...(status && { status }),
           ...(startDate && { dueDate: { gte: startDate } }),
           ...(endDate && { dueDate: { lte: endDate } }),
+          ...(effectiveBranchId && { invoice: { purchaseOrder: { branchId: effectiveBranchId } } }),
         };
         
         if (supplierId) {
-          where.invoice = { supplierId };
+          where.invoice = { ...where.invoice, supplierId };
         }
         
         const [schedules, total] = await Promise.all([
@@ -1143,6 +1163,17 @@ export const accountingRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const invoice = await ctx.prisma.supplierInvoice.findUnique({
+          where: { id: input.invoiceId },
+          include: { purchaseOrder: { select: { branchId: true } } },
+        });
+        const branchId = ctx.user.branchId || invoice?.purchaseOrder?.branchId;
+        if (branchId) {
+          const openCycle = await getOpenDayCycle(branchId);
+          if (!openCycle) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before creating a payment schedule." });
+          }
+        }
         return ctx.prisma.paymentSchedule.create({
           data: input,
           include: { invoice: true },
@@ -1150,11 +1181,68 @@ export const accountingRouter = router({
       }),
 
     markPaid: accountingProcedure
-      .input(z.object({ id: z.string().uuid() }))
+      .input(z.object({
+        id: z.string().uuid(),
+        paymentMethod: z.enum(["CASH", "BANK_TRANSFER"]).default("CASH"),
+      }))
       .mutation(async ({ ctx, input }) => {
-        return ctx.prisma.paymentSchedule.update({
+        const schedule = await ctx.prisma.paymentSchedule.findUnique({
           where: { id: input.id },
-          data: { status: 'PAID', paidDate: new Date() },
+          include: { invoice: { include: { purchaseOrder: true } } },
+        });
+
+        if (!schedule) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Payment schedule not found" });
+        }
+
+        const branchId = ctx.user.branchId || schedule.invoice.purchaseOrder?.branchId;
+        const dayCycle = branchId ? await getOpenDayCycle(branchId) : null;
+
+        return ctx.prisma.$transaction(async (tx) => {
+          const updated = await tx.paymentSchedule.update({
+            where: { id: input.id },
+            data: { status: 'PAID', paidDate: new Date() },
+          });
+
+          if (dayCycle) {
+            const exchangeRate = Number(dayCycle.exchangeRateUsdSdg) || 1;
+            const amountSdg = Number(schedule.amountSdg);
+            const amountUsd = amountSdg / exchangeRate;
+
+            const apAccount = await tx.account.findFirst({ where: { accountType: "LIABILITY", isActive: true } });
+            const paymentAccount = await tx.account.findFirst({
+              where: { code: input.paymentMethod === "BANK_TRANSFER" ? "1100" : "1000", isActive: true },
+            });
+
+            if (!apAccount || !paymentAccount) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Required accounts (AP / Cash / Bank) not found in chart of accounts" });
+            }
+
+            const entryCount = await tx.journalEntry.count({ where: { dayCycleId: dayCycle.id } });
+            const entryNumber = `JE-SCHED-${dayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
+
+            await tx.journalEntry.create({
+              data: {
+                entryNumber,
+                dayCycleId: dayCycle.id,
+                entryDate: new Date(),
+                description: `Schedule payment: ${schedule.invoice.invoiceNumber || schedule.invoiceId}`,
+                referenceId: input.id,
+                referenceType: "PaymentSchedule",
+                isPosted: true,
+                postedAt: new Date(),
+                postedById: ctx.user.userId,
+                lines: {
+                  create: [
+                    { accountId: apAccount.id, debitSdg: amountSdg, debitUsd: amountUsd, creditSdg: 0, creditUsd: 0, description: `AP payment scheduled` },
+                    { accountId: paymentAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: amountSdg, creditUsd: amountUsd, description: `${input.paymentMethod === "BANK_TRANSFER" ? "Bank" : "Cash"} payment scheduled` },
+                  ],
+                },
+              },
+            });
+          }
+
+          return updated;
         });
       }),
 
@@ -1182,19 +1270,22 @@ export const accountingRouter = router({
         z.object({
           isMatched: z.boolean().optional(),
           supplierId: z.string().uuid().optional(),
+          branchId: z.string().uuid().optional(),
           page: z.number().int().positive().default(1),
           pageSize: z.number().int().positive().max(100).default(20),
         })
       )
       .query(async ({ ctx, input }) => {
-        const { isMatched, supplierId, page, pageSize } = input;
+        const { isMatched, supplierId, branchId, page, pageSize } = input;
+        const effectiveBranchId = branchId || ctx.user.branchId;
         
         const where: any = {
           ...(isMatched !== undefined && { isMatched }),
+          ...(effectiveBranchId && { invoice: { purchaseOrder: { branchId: effectiveBranchId } } }),
         };
         
         if (supplierId) {
-          where.invoice = { supplierId };
+          where.invoice = { ...where.invoice, supplierId };
         }
         
         const [notices, total] = await Promise.all([
@@ -1227,11 +1318,17 @@ export const accountingRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
-        if (ctx.user.branchId) {
-          const openCycle = await getOpenDayCycle(ctx.user.branchId);
-          if (!openCycle) {
-            throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before recording a bank notice." });
-          }
+        const invoice = await ctx.prisma.supplierInvoice.findUnique({
+          where: { id: input.invoiceId },
+          include: { purchaseOrder: { select: { branchId: true } } },
+        });
+        const branchId = ctx.user.branchId || invoice?.purchaseOrder?.branchId;
+        if (!branchId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot determine branch for day cycle check" });
+        }
+        const openCycle = await getOpenDayCycle(branchId);
+        if (!openCycle) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before recording a bank notice." });
         }
         return ctx.prisma.bankNotice.create({
           data: input,
@@ -1270,34 +1367,75 @@ export const accountingRouter = router({
           }
         }
         
-        // Update notice as matched
-        const updated = await ctx.prisma.bankNotice.update({
-          where: { id: input.id },
-          data: {
-            isMatched: true,
-            matchedAt: new Date(),
-            matchedById: ctx.user.userId,
-          },
-          include: { invoice: { include: { supplier: true } }, matchedBy: { select: { id: true, name: true } } },
-        });
-        
-        // Determine if invoice is fully paid by summing all matched notices
-        const allMatchedNotices = await ctx.prisma.bankNotice.findMany({
-          where: { invoiceId: notice.invoiceId, isMatched: true },
-        });
-        const totalPaid = allMatchedNotices.reduce((sum, n) => sum + Number(n.amountSdg), 0) + Number(notice.amountSdg);
-        const invoiceTotal = Number(notice.invoice.totalSdg);
-        const newStatus = totalPaid >= invoiceTotal ? 'PAID' : 'OUTSTANDING';
+        const matchDayCycle = matchBranchId ? await getOpenDayCycle(matchBranchId) : null;
 
-        await ctx.prisma.supplierInvoice.update({
-          where: { id: notice.invoiceId },
-          data: {
-            status: newStatus,
-            paidAmountSdg: totalPaid,
-          },
+        return ctx.prisma.$transaction(async (tx) => {
+          // Update notice as matched
+          const updated = await tx.bankNotice.update({
+            where: { id: input.id },
+            data: {
+              isMatched: true,
+              matchedAt: new Date(),
+              matchedById: ctx.user.userId,
+            },
+            include: { invoice: { include: { supplier: true } }, matchedBy: { select: { id: true, name: true } } },
+          });
+
+          // Determine if invoice is fully paid by summing all matched notices
+          const allMatchedNotices = await tx.bankNotice.findMany({
+            where: { invoiceId: notice.invoiceId, isMatched: true },
+          });
+          const totalPaid = allMatchedNotices.reduce((sum, n) => sum + Number(n.amountSdg), 0) + Number(notice.amountSdg);
+          const invoiceTotal = Number(notice.invoice.totalSdg);
+          const newStatus = totalPaid >= invoiceTotal ? 'PAID' : 'OUTSTANDING';
+
+          await tx.supplierInvoice.update({
+            where: { id: notice.invoiceId },
+            data: {
+              status: newStatus,
+              paidAmountSdg: totalPaid,
+            },
+          });
+
+          // Create journal entry: debit AP, credit Bank
+          if (matchDayCycle) {
+            const exchangeRate = Number(matchDayCycle.exchangeRateUsdSdg) || 1;
+            const amountSdg = Number(notice.amountSdg);
+            const amountUsd = amountSdg / exchangeRate;
+
+            const apAccount = await tx.account.findFirst({ where: { accountType: "LIABILITY", isActive: true } });
+            const bankAccount = await tx.account.findFirst({ where: { code: "1100", isActive: true } });
+
+            if (!apAccount || !bankAccount) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Required accounts (AP / Bank) not found in chart of accounts" });
+            }
+
+            const entryCount = await tx.journalEntry.count({ where: { dayCycleId: matchDayCycle.id } });
+            const entryNumber = `JE-MATCH-${matchDayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
+
+            await tx.journalEntry.create({
+              data: {
+                entryNumber,
+                dayCycleId: matchDayCycle.id,
+                entryDate: new Date(),
+                description: `Bank notice match: ${input.operationNumber}`,
+                referenceId: input.id,
+                referenceType: "BankNotice",
+                isPosted: true,
+                postedAt: new Date(),
+                postedById: ctx.user.userId,
+                lines: {
+                  create: [
+                    { accountId: apAccount.id, debitSdg: amountSdg, debitUsd: amountUsd, creditSdg: 0, creditUsd: 0, description: `AP matched: ${input.operationNumber}` },
+                    { accountId: bankAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: amountSdg, creditUsd: amountUsd, description: `Bank matched: ${input.operationNumber}` },
+                  ],
+                },
+              },
+            });
+          }
+
+          return updated;
         });
-        
-        return updated;
       }),
 
     unmatch: adminProcedure
@@ -1322,6 +1460,7 @@ export const accountingRouter = router({
         z.object({
           status: z.enum(["DRAFT", "CONFIRMED", "OUTSTANDING", "SCHEDULED", "PAID", "CANCELLED"]).optional(),
           supplierId: z.string().uuid().optional(),
+          branchId: z.string().uuid().optional(),
           isConsignment: z.boolean().optional(),
           startDate: z.coerce.date().optional(),
           endDate: z.coerce.date().optional(),
@@ -1330,13 +1469,15 @@ export const accountingRouter = router({
         })
       )
       .query(async ({ ctx, input }) => {
-        const { status, supplierId, isConsignment, startDate, endDate, page, pageSize } = input;
+        const { status, supplierId, branchId, isConsignment, startDate, endDate, page, pageSize } = input;
+        const effectiveBranchId = branchId || ctx.user.branchId;
         
         const where: any = {
           ...(status && { status }),
           ...(supplierId && { supplierId }),
           ...(startDate && { invoiceDate: { gte: startDate } }),
           ...(endDate && { invoiceDate: { lte: endDate } }),
+          ...(effectiveBranchId && { purchaseOrder: { branchId: effectiveBranchId } }),
         };
         
         // For consignment invoices, filter by supplier isConsignor
@@ -1528,6 +1669,9 @@ export const accountingRouter = router({
         const isFullyPaid = totalPaid >= totalAmount;
         const newStatus = isFullyPaid ? "PAID" : "OUTSTANDING";
 
+        const payBranchId = ctx.user.branchId || (invoice as any).purchaseOrder?.branchId;
+        const payDayCycle = payBranchId ? await getOpenDayCycle(payBranchId) : null;
+
         return ctx.prisma.$transaction(async (tx) => {
           const updated = await tx.supplierInvoice.update({
             where: { id: input.id },
@@ -1543,27 +1687,58 @@ export const accountingRouter = router({
             include: { supplier: true, purchaseOrder: true },
           });
 
-          // For bank transfers, create a Transaction record so it shows in the bank tab
-          if (input.paymentMethod === "BANK_TRANSFER") {
-            const branchId = ctx.user.branchId || updated.purchaseOrder?.branchId;
-            if (branchId) {
-              const dayCycle = await getOpenDayCycle(branchId);
-              if (dayCycle) {
-                const exchangeRate = Number(dayCycle.exchangeRateUsdSdg) || 1;
-                await tx.transaction.create({
-                  data: {
-                    branchId,
-                    dayCycleId: dayCycle.id,
-                    transactionType: "BANK_OUT",
-                    amountSdg: newPaymentAmount,
-                    amountUsd: newPaymentAmount / exchangeRate,
-                    description: `Bank payment for supplier invoice ${invoice.invoiceNumber || input.id}`,
-                    referenceNumber: input.transactionNumber,
-                    receiptImages: input.receiptImageUrl ? [input.receiptImageUrl] : [],
-                    createdById: ctx.user.userId,
-                  },
-                });
-              }
+          if (payBranchId && payDayCycle) {
+            const exchangeRate = Number(payDayCycle.exchangeRateUsdSdg) || 1;
+            const amountUsd = newPaymentAmount / exchangeRate;
+
+            // Look up AP account (LIABILITY), Cash (1000) or Bank (1100)
+            const apAccount = await tx.account.findFirst({ where: { accountType: "LIABILITY", isActive: true } });
+            const paymentAccount = await tx.account.findFirst({
+              where: { code: input.paymentMethod === "BANK_TRANSFER" ? "1100" : "1000", isActive: true },
+            });
+
+            if (!apAccount || !paymentAccount) {
+              throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Required accounts (AP / Cash / Bank) not found in chart of accounts" });
+            }
+
+            const entryCount = await tx.journalEntry.count({ where: { dayCycleId: payDayCycle.id } });
+            const entryNumber = `JE-PAY-${payDayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
+
+            await tx.journalEntry.create({
+              data: {
+                entryNumber,
+                dayCycleId: payDayCycle.id,
+                entryDate: new Date(),
+                description: `Supplier payment: ${invoice.invoiceNumber || input.id}`,
+                referenceId: input.id,
+                referenceType: "SupplierInvoice",
+                isPosted: true,
+                postedAt: new Date(),
+                postedById: ctx.user.userId,
+                lines: {
+                  create: [
+                    { accountId: apAccount.id, debitSdg: newPaymentAmount, debitUsd: amountUsd, creditSdg: 0, creditUsd: 0, description: `AP payment: ${invoice.invoiceNumber || input.id}` },
+                    { accountId: paymentAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: newPaymentAmount, creditUsd: amountUsd, description: `${input.paymentMethod === "BANK_TRANSFER" ? "Bank" : "Cash"} payment: ${invoice.invoiceNumber || input.id}` },
+                  ],
+                },
+              },
+            });
+
+            // For bank transfers, also create a Transaction record so it shows in the bank tab
+            if (input.paymentMethod === "BANK_TRANSFER") {
+              await tx.transaction.create({
+                data: {
+                  branchId: payBranchId,
+                  dayCycleId: payDayCycle.id,
+                  transactionType: "BANK_OUT",
+                  amountSdg: newPaymentAmount,
+                  amountUsd,
+                  description: `Bank payment for supplier invoice ${invoice.invoiceNumber || input.id}`,
+                  referenceNumber: input.transactionNumber,
+                  receiptImages: input.receiptImageUrl ? [input.receiptImageUrl] : [],
+                  createdById: ctx.user.userId,
+                },
+              });
             }
           }
 
@@ -1669,6 +1844,13 @@ export const accountingRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        if (ctx.user.branchId) {
+          const openCycle = await getOpenDayCycle(ctx.user.branchId);
+          if (!openCycle) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before submitting a bank payment." });
+          }
+        }
+
         if (input.transactionId) {
           const existing = await ctx.prisma.bankPayment.findFirst({
             where: { transactionId: input.transactionId },

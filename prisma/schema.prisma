@@ -413,6 +413,7 @@ model GoodsReceipt {
 
   @@index([purchaseOrderId])
   @@index([dayCycleId])
+  @@index([receiptDate])
   @@map("goods_receipts")
 }
 
@@ -473,6 +474,8 @@ model SupplierInvoice {
   @@unique([supplierId, invoiceNumber])
   @@index([supplierId])
   @@index([status])
+  @@index([invoiceDate])
+  @@index([dueDate])
   @@map("supplier_invoices")
 }
 
@@ -590,6 +593,7 @@ model SalesOrder {
 
   @@index([customerId])
   @@index([branchId])
+  @@index([warehouseId])
   @@index([dayCycleId])
   @@index([status])
   @@map("sales_orders")

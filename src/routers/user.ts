@@ -168,7 +168,6 @@ export const userRouter = router({
               },
             });
             
-            console.log(`✅ Created shelf "${shelf.name}" (${shelf.code}) for user ${user.email}`);
           } catch (shelfError: any) {
             console.error(`❌ Failed to create shelf for user ${user.email}:`, shelfError);
             // Re-throw to rollback transaction
@@ -204,7 +203,6 @@ export const userRouter = router({
               code: shelfCode,
             },
           });
-          console.log(`✅ Created shelf "${result.shelf.name}" (${result.shelf.code}) for user ${result.user.email} (fallback)`);
         } catch (fallbackError: any) {
           console.error(`❌ Fallback shelf creation also failed for user ${result.user.email}:`, fallbackError);
           // Don't throw - user is already created, but log the error
