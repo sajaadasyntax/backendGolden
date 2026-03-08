@@ -634,12 +634,110 @@ export const salesRouter = router({
         return invoice;
       }),
 
+    void: shelfSalesProcedure
+      .input(z.object({ id: z.string().uuid(), reason: z.string().optional() }))
+      .mutation(async ({ ctx, input }) => {
+        const invoice = await ctx.prisma.salesInvoice.findUnique({
+          where: { id: input.id },
+          include: { lines: { include: { batch: true } }, shelf: { include: { user: { select: { branchId: true } } } }, dayCycle: true },
+        });
+
+        if (!invoice) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Invoice not found" });
+        }
+
+        if (invoice.status === "CANCELLED") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Invoice is already cancelled" });
+        }
+
+        if (invoice.status === "PAID") {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot void a fully paid invoice" });
+        }
+
+        const branchId = invoice.shelf?.user?.branchId;
+
+        return ctx.prisma.$transaction(async (tx) => {
+          // Reverse stock movements (restore batch quantities)
+          for (const line of invoice.lines) {
+            await tx.batch.update({
+              where: { id: line.batchId },
+              data: { qtyRemaining: { increment: Number(line.qty) } },
+            });
+            await tx.stockMovement.create({
+              data: {
+                batchId: line.batchId,
+                qty: Number(line.qty),
+                movementType: "RETURN",
+                referenceId: invoice.id,
+                referenceType: "SalesInvoiceVoid",
+              },
+            });
+          }
+
+          // Create reversal journal entry if branchId available
+          if (branchId) {
+            const cashAccount = await tx.account.findFirst({ where: { code: "1000", isActive: true } });
+            const arAccount = await tx.account.findFirst({ where: { code: "1200", isActive: true } });
+            const revenueAccount = await tx.account.findFirst({ where: { code: "4000", isActive: true } });
+            const cogsAccount = await tx.account.findFirst({ where: { code: "5000", isActive: true } });
+            const inventoryAccount = await tx.account.findFirst({ where: { code: "1300", isActive: true } });
+
+            if (revenueAccount && cogsAccount && inventoryAccount) {
+              const entryCount = await tx.journalEntry.count({ where: { dayCycleId: invoice.dayCycleId } });
+              const entryNumber = `JE-VOID-${invoice.dayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
+              const totalUsd = Number(invoice.totalUsd);
+              const totalSdg = Number(invoice.totalSdg);
+              const exchangeRate = Number(invoice.dayCycle.exchangeRateUsdSdg);
+              const totalCostUsd = invoice.lines.reduce((sum, l) => sum + (Number(l.qty) * Number(l.unitCostUsd || 0)), 0);
+              const totalCostSdg = totalCostUsd * exchangeRate;
+              const debitAccount = arAccount || cashAccount;
+
+              const reversalLines: any[] = [
+                { accountId: revenueAccount.id, debitSdg: totalSdg, debitUsd: totalUsd, creditSdg: 0, creditUsd: 0, description: `Void sales revenue - ${invoice.invoiceNumber}` },
+                { accountId: inventoryAccount.id, debitSdg: totalCostSdg, debitUsd: totalCostUsd, creditSdg: 0, creditUsd: 0, description: `Void inventory restoration - ${invoice.invoiceNumber}` },
+              ];
+              if (debitAccount) {
+                reversalLines.push({ accountId: debitAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: totalSdg, creditUsd: totalUsd, description: `Void debit reversal - ${invoice.invoiceNumber}` });
+              }
+              if (cogsAccount) {
+                reversalLines.push({ accountId: cogsAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: totalCostSdg, creditUsd: totalCostUsd, description: `Void COGS reversal - ${invoice.invoiceNumber}` });
+              }
+
+              await tx.journalEntry.create({
+                data: {
+                  entryNumber,
+                  dayCycleId: invoice.dayCycleId,
+                  entryDate: new Date(),
+                  description: `Void Sales Invoice ${invoice.invoiceNumber}${input.reason ? ` - ${input.reason}` : ''}`,
+                  referenceId: invoice.id,
+                  referenceType: "SalesInvoiceVoid",
+                  isPosted: true,
+                  postedAt: new Date(),
+                  postedById: ctx.user.userId,
+                  lines: { create: reversalLines },
+                },
+              });
+            }
+          }
+
+          // Cancel the invoice
+          return tx.salesInvoice.update({
+            where: { id: invoice.id },
+            data: {
+              status: "CANCELLED",
+              notes: invoice.notes ? `${invoice.notes} | VOIDED: ${input.reason || 'No reason'}` : `VOIDED: ${input.reason || 'No reason'}`,
+            },
+          });
+        });
+      }),
+
     create: shelfSalesProcedure
       .input(
         z.object({
           customerId: z.string().uuid().optional(),
           shelfId: z.string().uuid(),
           invoiceType: z.enum(["WHOLESALE", "RETAIL"]),
+          paymentMethod: z.enum(["CASH", "BANK_TRANSFER", "CREDIT", "MIXED"]).optional().default("CASH"),
           notes: z.string().optional(),
           lines: z
             .array(
@@ -822,24 +920,24 @@ export const salesRouter = router({
           }
 
           // Create journal entry for sales invoice
-          // Find accounts: Cash (1000), Sales Revenue (4000), COGS (5000), Inventory (1300)
+          const isCredit = input.paymentMethod === "CREDIT";
           const cashAccount = await tx.account.findFirst({ where: { code: "1000", isActive: true } });
+          const arAccount = await tx.account.findFirst({ where: { code: "1200", isActive: true } });
           const revenueAccount = await tx.account.findFirst({ where: { code: "4000", isActive: true } });
           const cogsAccount = await tx.account.findFirst({ where: { code: "5000", isActive: true } });
           const inventoryAccount = await tx.account.findFirst({ where: { code: "1300", isActive: true } });
 
-          if (cashAccount && revenueAccount && cogsAccount && inventoryAccount) {
-            // Generate journal entry number
+          const debitAccount = isCredit ? arAccount : cashAccount;
+
+          if (debitAccount && revenueAccount && cogsAccount && inventoryAccount) {
             const entryCount = await tx.journalEntry.count({
               where: { dayCycleId: dayCycle.id },
             });
             const entryNumber = `JE-${dayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
 
-            // Calculate COGS (total cost of items sold)
             const totalCostUsd = linesData.reduce((sum, l) => sum + (l.qty * l.unitCostUsd), 0);
             const totalCostSdg = totalCostUsd * exchangeRate;
 
-            // Create journal entry
             await tx.journalEntry.create({
               data: {
                 entryNumber,
@@ -853,14 +951,14 @@ export const salesRouter = router({
                 postedById: ctx.user.userId,
                 lines: {
                   create: [
-                    // Debit Cash
+                    // Debit Cash or AR depending on payment method
                     {
-                      accountId: cashAccount.id,
+                      accountId: debitAccount.id,
                       debitSdg: totalSdg,
                       debitUsd: totalUsd,
                       creditSdg: 0,
                       creditUsd: 0,
-                      description: `Cash received from sales - ${invoiceNumber}`,
+                      description: `${isCredit ? 'AR' : 'Cash'} from sales - ${invoiceNumber}`,
                     },
                     // Credit Sales Revenue
                     {

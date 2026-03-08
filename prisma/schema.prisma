@@ -901,17 +901,19 @@ model ExpenseCategory {
 }
 
 model Expense {
-  id           String    @id @default(uuid())
-  branchId     String
-  dayCycleId   String
-  categoryId   String
-  amountSdg    Decimal   @db.Decimal(18, 2)
-  description  String
-  approvedById String?
-  approvedAt   DateTime?
-  createdById  String
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  id              String         @id @default(uuid())
+  branchId        String
+  dayCycleId      String
+  categoryId      String
+  amountSdg       Decimal        @db.Decimal(18, 2)
+  description     String
+  paymentMethod   PaymentMethod?
+  receiptImageUrl String?
+  approvedById    String?
+  approvedAt      DateTime?
+  createdById     String
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
 
   branch     Branch          @relation(fields: [branchId], references: [id])
   dayCycle   DayCycle        @relation(fields: [dayCycleId], references: [id])

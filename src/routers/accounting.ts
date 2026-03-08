@@ -346,6 +346,8 @@ export const accountingRouter = router({
           categoryId: z.string().uuid(),
           amountSdg: z.number().positive(),
           description: z.string().min(1),
+          paymentMethod: z.enum(["CASH", "BANK_TRANSFER"]).optional(),
+          receiptImageUrl: z.string().url().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -353,7 +355,6 @@ export const accountingRouter = router({
           throw new TRPCError({ code: "BAD_REQUEST", message: "User must be assigned to a branch" });
         }
 
-        // Get open day cycle (auto-closes previous days)
         const dayCycle = await getOpenDayCycle(ctx.user.branchId);
 
         if (!dayCycle) {
@@ -367,6 +368,8 @@ export const accountingRouter = router({
             categoryId: input.categoryId,
             amountSdg: input.amountSdg,
             description: input.description,
+            ...(input.paymentMethod && { paymentMethod: input.paymentMethod as any }),
+            ...(input.receiptImageUrl && { receiptImageUrl: input.receiptImageUrl }),
             createdById: ctx.user.userId,
           },
           include: { category: true },
@@ -886,11 +889,17 @@ export const accountingRouter = router({
               })
             : { _sum: { amountSdg: null } },
           ctx.prisma.supplierInvoice.aggregate({
-            where: { status: { in: ["OUTSTANDING", "SCHEDULED"] } },
+            where: {
+              status: { in: ["OUTSTANDING", "SCHEDULED"] },
+              branchId: input.branchId,
+            },
             _sum: { totalSdg: true },
           }),
           ctx.prisma.salesInvoice.aggregate({
-            where: { status: { in: ["ISSUED", "PARTIALLY_PAID"] } },
+            where: {
+              status: { in: ["ISSUED", "PARTIALLY_PAID"] },
+              shelf: { user: { branchId: input.branchId } },
+            },
             _sum: { totalSdg: true },
           }),
         ]);
@@ -1210,10 +1219,20 @@ export const accountingRouter = router({
           include: { invoice: { include: { supplier: true } }, matchedBy: { select: { id: true, name: true } } },
         });
         
-        // Update invoice status to PAID if fully matched
+        // Determine if invoice is fully paid by summing all matched notices
+        const allMatchedNotices = await ctx.prisma.bankNotice.findMany({
+          where: { invoiceId: notice.invoiceId, isMatched: true },
+        });
+        const totalPaid = allMatchedNotices.reduce((sum, n) => sum + Number(n.amountSdg), 0) + Number(notice.amountSdg);
+        const invoiceTotal = Number(notice.invoice.totalSdg);
+        const newStatus = totalPaid >= invoiceTotal ? 'PAID' : 'OUTSTANDING';
+
         await ctx.prisma.supplierInvoice.update({
           where: { id: notice.invoiceId },
-          data: { status: 'PAID' },
+          data: {
+            status: newStatus,
+            paidAmountSdg: totalPaid,
+          },
         });
         
         return updated;
