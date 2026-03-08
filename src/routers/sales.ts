@@ -368,7 +368,7 @@ export const salesRouter = router({
       .mutation(async ({ ctx, input }) => {
         const order = await ctx.prisma.salesOrder.findUnique({
           where: { id: input.orderId },
-          include: { lines: true, dayCycle: true, shelf: { include: { user: true } } },
+          include: { lines: true, dayCycle: true },
         });
 
         if (!order) {
@@ -379,7 +379,7 @@ export const salesRouter = router({
         }
 
         // Enforce day cycle
-        const deliverBranchId = (order.shelf as any)?.user?.branchId || ctx.user.branchId;
+        const deliverBranchId = order.branchId || ctx.user.branchId;
         if (deliverBranchId) {
           const openCycle = await getOpenDayCycle(deliverBranchId);
           if (!openCycle) {
