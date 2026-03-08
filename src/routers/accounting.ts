@@ -891,7 +891,7 @@ export const accountingRouter = router({
           ctx.prisma.supplierInvoice.aggregate({
             where: {
               status: { in: ["OUTSTANDING", "SCHEDULED"] },
-              branchId: input.branchId,
+              purchaseOrder: { branchId: input.branchId },
             },
             _sum: { totalSdg: true },
           }),
@@ -911,8 +911,8 @@ export const accountingRouter = router({
           lowStockItems,
           todaySales: Number(todaySales._sum.totalSdg || 0),
           todayExpenses: Number(todayExpenses._sum.amountSdg || 0),
-          outstandingPayables: Number(outstandingPayables._sum.totalSdg || 0),
-          outstandingReceivables: Number(outstandingReceivables._sum.totalSdg || 0),
+          outstandingPayables: Number(outstandingPayables._sum?.totalSdg || 0),
+          outstandingReceivables: Number(outstandingReceivables._sum?.totalSdg || 0),
         };
       }),
   }),

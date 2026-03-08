@@ -667,7 +667,7 @@ export const salesRouter = router({
               data: {
                 batchId: line.batchId,
                 qty: Number(line.qty),
-                movementType: "RETURN",
+                movementType: "RETURN_IN",
                 referenceId: invoice.id,
                 referenceType: "SalesInvoiceVoid",
               },
