@@ -479,6 +479,8 @@ model SupplierInvoice {
 enum PaymentMethod {
   CASH
   BANK_TRANSFER
+  CREDIT
+  MIXED
 }
 
 enum SupplierInvoiceStatus {
@@ -634,6 +636,7 @@ model SalesInvoice {
   totalUsd      Decimal            @db.Decimal(18, 4)
   totalSdg      Decimal            @db.Decimal(18, 2)
   paidAmountSdg Decimal?           @db.Decimal(18, 2)
+  paymentMethod PaymentMethod?
   status        SalesInvoiceStatus @default(DRAFT)
   notes         String?
   createdById   String

@@ -368,7 +368,7 @@ export const salesRouter = router({
       .mutation(async ({ ctx, input }) => {
         const order = await ctx.prisma.salesOrder.findUnique({
           where: { id: input.orderId },
-          include: { lines: true, dayCycle: true },
+          include: { lines: true, dayCycle: true, shelf: { include: { user: true } } },
         });
 
         if (!order) {
@@ -376,6 +376,18 @@ export const salesRouter = router({
             code: "NOT_FOUND",
             message: "Sales order not found",
           });
+        }
+
+        // Enforce day cycle
+        const deliverBranchId = (order.shelf as any)?.user?.branchId || ctx.user.branchId;
+        if (deliverBranchId) {
+          const openCycle = await getOpenDayCycle(deliverBranchId);
+          if (!openCycle) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "Day is closed. Please open the day cycle before delivering goods.",
+            });
+          }
         }
 
         if (!["CONFIRMED", "PARTIALLY_DELIVERED"].includes(order.status)) {
@@ -656,6 +668,17 @@ export const salesRouter = router({
 
         const branchId = invoice.shelf?.user?.branchId;
 
+        // Enforce day cycle
+        if (branchId) {
+          const openCycle = await getOpenDayCycle(branchId);
+          if (!openCycle) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "Day is closed. Please open the day cycle before voiding an invoice.",
+            });
+          }
+        }
+
         return ctx.prisma.$transaction(async (tx) => {
           // Reverse stock movements (restore batch quantities)
           for (const line of invoice.lines) {
@@ -674,51 +697,58 @@ export const salesRouter = router({
             });
           }
 
-          // Create reversal journal entry if branchId available
-          if (branchId) {
-            const cashAccount = await tx.account.findFirst({ where: { code: "1000", isActive: true } });
-            const arAccount = await tx.account.findFirst({ where: { code: "1200", isActive: true } });
-            const revenueAccount = await tx.account.findFirst({ where: { code: "4000", isActive: true } });
-            const cogsAccount = await tx.account.findFirst({ where: { code: "5000", isActive: true } });
-            const inventoryAccount = await tx.account.findFirst({ where: { code: "1300", isActive: true } });
-
-            if (revenueAccount && cogsAccount && inventoryAccount) {
-              const entryCount = await tx.journalEntry.count({ where: { dayCycleId: invoice.dayCycleId } });
-              const entryNumber = `JE-VOID-${invoice.dayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
-              const totalUsd = Number(invoice.totalUsd);
-              const totalSdg = Number(invoice.totalSdg);
-              const exchangeRate = Number(invoice.dayCycle.exchangeRateUsdSdg);
-              const totalCostUsd = invoice.lines.reduce((sum, l) => sum + (Number(l.qty) * Number(l.unitCostUsd || 0)), 0);
-              const totalCostSdg = totalCostUsd * exchangeRate;
-              const debitAccount = arAccount || cashAccount;
-
-              const reversalLines: any[] = [
-                { accountId: revenueAccount.id, debitSdg: totalSdg, debitUsd: totalUsd, creditSdg: 0, creditUsd: 0, description: `Void sales revenue - ${invoice.invoiceNumber}` },
-                { accountId: inventoryAccount.id, debitSdg: totalCostSdg, debitUsd: totalCostUsd, creditSdg: 0, creditUsd: 0, description: `Void inventory restoration - ${invoice.invoiceNumber}` },
-              ];
-              if (debitAccount) {
-                reversalLines.push({ accountId: debitAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: totalSdg, creditUsd: totalUsd, description: `Void debit reversal - ${invoice.invoiceNumber}` });
-              }
-              if (cogsAccount) {
-                reversalLines.push({ accountId: cogsAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: totalCostSdg, creditUsd: totalCostUsd, description: `Void COGS reversal - ${invoice.invoiceNumber}` });
-              }
-
-              await tx.journalEntry.create({
-                data: {
-                  entryNumber,
-                  dayCycleId: invoice.dayCycleId,
-                  entryDate: new Date(),
-                  description: `Void Sales Invoice ${invoice.invoiceNumber}${input.reason ? ` - ${input.reason}` : ''}`,
-                  referenceId: invoice.id,
-                  referenceType: "SalesInvoiceVoid",
-                  isPosted: true,
-                  postedAt: new Date(),
-                  postedById: ctx.user.userId,
-                  lines: { create: reversalLines },
-                },
-              });
-            }
+          // Create reversal journal entry
+          if (!branchId) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Cannot void invoice: branch information missing" });
           }
+
+          const cashAccount = await tx.account.findFirst({ where: { code: "1000", isActive: true } });
+          const arAccount = await tx.account.findFirst({ where: { code: "1200", isActive: true } });
+          const revenueAccount = await tx.account.findFirst({ where: { code: "4000", isActive: true } });
+          const cogsAccount = await tx.account.findFirst({ where: { code: "5000", isActive: true } });
+          const inventoryAccount = await tx.account.findFirst({ where: { code: "1300", isActive: true } });
+
+          if (!revenueAccount || !cogsAccount || !inventoryAccount) {
+            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Cannot void invoice: required chart of accounts entries missing (Revenue/COGS/Inventory)" });
+          }
+
+          // Determine debit account based on original payment method
+          const isCreditSale = invoice.paymentMethod === "CREDIT";
+          const debitAccount = isCreditSale ? arAccount : cashAccount;
+
+          if (!debitAccount) {
+            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: `Cannot void invoice: ${isCreditSale ? 'AR account (1200)' : 'Cash account (1000)'} not found` });
+          }
+
+          const entryCount = await tx.journalEntry.count({ where: { dayCycleId: invoice.dayCycleId } });
+          const entryNumber = `JE-VOID-${invoice.dayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
+          const totalUsd = Number(invoice.totalUsd);
+          const totalSdg = Number(invoice.totalSdg);
+          const exchangeRate = Number(invoice.dayCycle.exchangeRateUsdSdg);
+          const totalCostUsd = invoice.lines.reduce((sum, l) => sum + (Number(l.qty) * Number(l.unitCostUsd || 0)), 0);
+          const totalCostSdg = totalCostUsd * exchangeRate;
+
+          const reversalLines: any[] = [
+            { accountId: revenueAccount.id, debitSdg: totalSdg, debitUsd: totalUsd, creditSdg: 0, creditUsd: 0, description: `Void sales revenue - ${invoice.invoiceNumber}` },
+            { accountId: inventoryAccount.id, debitSdg: totalCostSdg, debitUsd: totalCostUsd, creditSdg: 0, creditUsd: 0, description: `Void inventory restoration - ${invoice.invoiceNumber}` },
+            { accountId: debitAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: totalSdg, creditUsd: totalUsd, description: `Void debit reversal - ${invoice.invoiceNumber}` },
+            { accountId: cogsAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: totalCostSdg, creditUsd: totalCostUsd, description: `Void COGS reversal - ${invoice.invoiceNumber}` },
+          ];
+
+          await tx.journalEntry.create({
+            data: {
+              entryNumber,
+              dayCycleId: invoice.dayCycleId,
+              entryDate: new Date(),
+              description: `Void Sales Invoice ${invoice.invoiceNumber}${input.reason ? ` - ${input.reason}` : ''}`,
+              referenceId: invoice.id,
+              referenceType: "SalesInvoiceVoid",
+              isPosted: true,
+              postedAt: new Date(),
+              postedById: ctx.user.userId,
+              lines: { create: reversalLines },
+            },
+          });
 
           // Cancel the invoice
           return tx.salesInvoice.update({
@@ -895,6 +925,7 @@ export const salesRouter = router({
               invoiceDate: today,
               totalUsd,
               totalSdg,
+              paymentMethod: input.paymentMethod as any,
               status: "ISSUED",
               notes: input.notes,
               createdById: ctx.user.userId,
@@ -1411,7 +1442,7 @@ export const salesRouter = router({
       .mutation(async ({ ctx, input }) => {
         const request = await ctx.prisma.goodsRequest.findUnique({
           where: { id: input.requestId },
-          include: { lines: true, shelf: true },
+          include: { lines: true, shelf: { include: { user: true } } },
         });
 
         if (!request) {
@@ -1419,6 +1450,18 @@ export const salesRouter = router({
             code: "NOT_FOUND",
             message: "Goods request not found",
           });
+        }
+
+        // Enforce day cycle
+        const issueBranchId = (request.shelf as any)?.user?.branchId || ctx.user.branchId;
+        if (issueBranchId) {
+          const openCycle = await getOpenDayCycle(issueBranchId);
+          if (!openCycle) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "Day is closed. Please open the day cycle before issuing goods.",
+            });
+          }
         }
 
         if (request.status !== "APPROVED") {
@@ -1568,6 +1611,7 @@ export const salesRouter = router({
       .mutation(async ({ ctx, input }) => {
         const request = await ctx.prisma.goodsRequest.findUnique({
           where: { id: input.requestId },
+          include: { shelf: { include: { user: true } } },
         });
 
         if (!request) {
@@ -1575,6 +1619,18 @@ export const salesRouter = router({
             code: "NOT_FOUND",
             message: "Goods request not found",
           });
+        }
+
+        // Enforce day cycle
+        const receiveBranchId = (request.shelf as any)?.user?.branchId || ctx.user.branchId;
+        if (receiveBranchId) {
+          const openCycle = await getOpenDayCycle(receiveBranchId);
+          if (!openCycle) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: "Day is closed. Please open the day cycle before receiving goods.",
+            });
+          }
         }
 
         if (request.status !== "ISSUED") {

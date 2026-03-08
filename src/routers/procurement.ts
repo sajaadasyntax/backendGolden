@@ -248,7 +248,16 @@ export const procurementRouter = router({
       .mutation(async ({ ctx, input }) => {
         // Validate branch access
         validateBranchAccess(ctx.user.branchId, ctx.user.role, input.branchId);
-        
+
+        // Enforce day cycle
+        const poDayCycle = await getOpenDayCycle(input.branchId);
+        if (!poDayCycle) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Day is closed. Please open the day cycle before creating a purchase order.",
+          });
+        }
+
         // Generate PO number
         const count = await ctx.prisma.purchaseOrder.count({
           where: { branchId: input.branchId },

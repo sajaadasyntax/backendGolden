@@ -361,18 +361,73 @@ export const accountingRouter = router({
           throw new TRPCError({ code: "BAD_REQUEST", message: "Day must be open. Please open the day cycle with an exchange rate first." });
         }
 
-        return ctx.prisma.expense.create({
-          data: {
-            branchId: ctx.user.branchId,
-            dayCycleId: dayCycle.id,
-            categoryId: input.categoryId,
-            amountSdg: input.amountSdg,
-            description: input.description,
-            ...(input.paymentMethod && { paymentMethod: input.paymentMethod as any }),
-            ...(input.receiptImageUrl && { receiptImageUrl: input.receiptImageUrl }),
-            createdById: ctx.user.userId,
-          },
-          include: { category: true },
+        return ctx.prisma.$transaction(async (tx) => {
+          const expense = await tx.expense.create({
+            data: {
+              branchId: ctx.user.branchId!,
+              dayCycleId: dayCycle.id,
+              categoryId: input.categoryId,
+              amountSdg: input.amountSdg,
+              description: input.description,
+              ...(input.paymentMethod && { paymentMethod: input.paymentMethod as any }),
+              ...(input.receiptImageUrl && { receiptImageUrl: input.receiptImageUrl }),
+              createdById: ctx.user.userId,
+            },
+            include: { category: true },
+          });
+
+          // Create journal entry: Debit Expense account, Credit Cash or Bank
+          const exchangeRate = Number(dayCycle.exchangeRateUsdSdg) || 1;
+          const amountUsd = input.amountSdg / exchangeRate;
+          const isBankPayment = input.paymentMethod === "BANK_TRANSFER";
+
+          const expenseAccount = await tx.account.findFirst({ where: { accountType: "EXPENSE", isActive: true } });
+          const creditAccount = await tx.account.findFirst({
+            where: { code: isBankPayment ? "1100" : "1000", isActive: true },
+          });
+
+          if (expenseAccount && creditAccount) {
+            const entryCount = await tx.journalEntry.count({ where: { dayCycleId: dayCycle.id } });
+            const entryNumber = `JE-EXP-${dayCycle.cycleDate.toISOString().split('T')[0].replace(/-/g, '')}-${String(entryCount + 1).padStart(4, '0')}`;
+
+            await tx.journalEntry.create({
+              data: {
+                entryNumber,
+                dayCycleId: dayCycle.id,
+                entryDate: new Date(),
+                description: `Expense: ${input.description}`,
+                referenceId: expense.id,
+                referenceType: "Expense",
+                isPosted: true,
+                postedAt: new Date(),
+                postedById: ctx.user.userId,
+                lines: {
+                  create: [
+                    { accountId: expenseAccount.id, debitSdg: input.amountSdg, debitUsd: amountUsd, creditSdg: 0, creditUsd: 0, description: `Expense: ${input.description}` },
+                    { accountId: creditAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: input.amountSdg, creditUsd: amountUsd, description: `Expense payment: ${input.description}` },
+                  ],
+                },
+              },
+            });
+          }
+
+          // For bank payments, create a Transaction record so it shows in the bank tab
+          if (isBankPayment) {
+            await tx.transaction.create({
+              data: {
+                branchId: ctx.user.branchId!,
+                dayCycleId: dayCycle.id,
+                transactionType: "BANK_OUT",
+                amountSdg: input.amountSdg,
+                amountUsd: amountUsd,
+                description: `Bank payment for expense: ${input.description}`,
+                receiptImages: input.receiptImageUrl ? [input.receiptImageUrl] : [],
+                createdById: ctx.user.userId,
+              },
+            });
+          }
+
+          return expense;
         });
       }),
 
@@ -407,11 +462,17 @@ export const accountingRouter = router({
 
         const exchangeRate = dayCycle ? Number(dayCycle.exchangeRateUsdSdg) : 1;
 
-        // Calculate balances from journal entries
+        // Calculate balances from journal entries - filtered by branch
         const balances = await Promise.all(
           accounts.map(async (account) => {
             const result = await ctx.prisma.journalLine.aggregate({
-              where: { accountId: account.id, journalEntry: { isPosted: true } },
+              where: {
+                accountId: account.id,
+                journalEntry: {
+                  isPosted: true,
+                  dayCycle: { branchId: input.branchId },
+                },
+              },
               _sum: { debitSdg: true, creditSdg: true, debitUsd: true, creditUsd: true },
             });
 
@@ -422,12 +483,13 @@ export const accountingRouter = router({
           })
         );
 
-        // Calculate inventory value from all batches in shelves and warehouses
+        // Calculate inventory value filtered by branch
         const shelves = await ctx.prisma.shelf.findMany({
-          where: { isActive: true },
+          where: { isActive: true, user: { branchId: input.branchId } },
           select: { id: true },
         });
 
+        // Warehouses don't have branchId - include all active warehouses
         const warehouses = await ctx.prisma.warehouse.findMany({
           where: { isActive: true },
           select: { id: true },
@@ -497,7 +559,7 @@ export const accountingRouter = router({
           where: { accountType: "EXPENSE", isActive: true },
         });
 
-        // Calculate today's income (revenue credits)
+        // Calculate today's income (revenue credits) - branch-scoped
         let todayIncome = 0;
         if (revenueAccount) {
           const revenueResult = await ctx.prisma.journalLine.aggregate({
@@ -506,6 +568,7 @@ export const accountingRouter = router({
               journalEntry: {
                 isPosted: true,
                 entryDate: { gte: todayStart, lte: todayEnd },
+                dayCycle: { branchId: input.branchId },
               },
             },
             _sum: { creditSdg: true },
@@ -513,7 +576,7 @@ export const accountingRouter = router({
           todayIncome = Number(revenueResult._sum.creditSdg || 0);
         }
 
-        // Calculate today's expenses (expense debits)
+        // Calculate today's expenses (expense debits) - branch-scoped via journal
         let todayExpenses = 0;
         if (expenseAccounts.length > 0) {
           const expenseAccountIds = expenseAccounts.map(acc => acc.id);
@@ -523,6 +586,7 @@ export const accountingRouter = router({
               journalEntry: {
                 isPosted: true,
                 entryDate: { gte: todayStart, lte: todayEnd },
+                dayCycle: { branchId: input.branchId },
               },
             },
             _sum: { debitSdg: true },
@@ -530,17 +594,7 @@ export const accountingRouter = router({
           todayExpenses = Number(expenseResult._sum.debitSdg || 0);
         }
 
-        // Also check expense records for today
-        const todayExpenseRecords = await ctx.prisma.expense.aggregate({
-          where: {
-            branchId: input.branchId,
-            createdAt: { gte: todayStart, lte: todayEnd },
-          },
-          _sum: { amountSdg: true },
-        });
-        todayExpenses += Number(todayExpenseRecords._sum.amountSdg || 0);
-
-        // Calculate Accounts Receivable (ذمم مدينة) - from customer balances
+        // Calculate Accounts Receivable - always derived from journal (branch-scoped)
         const accountsReceivableAccount = await ctx.prisma.account.findFirst({
           where: { code: "1200", isActive: true },
         });
@@ -549,21 +603,14 @@ export const accountingRouter = router({
           const arResult = await ctx.prisma.journalLine.aggregate({
             where: {
               accountId: accountsReceivableAccount.id,
-              journalEntry: { isPosted: true },
+              journalEntry: {
+                isPosted: true,
+                dayCycle: { branchId: input.branchId },
+              },
             },
             _sum: { debitSdg: true, creditSdg: true },
           });
           accountsReceivable = Number(arResult._sum.debitSdg || 0) - Number(arResult._sum.creditSdg || 0);
-        }
-
-        // Also get from customer balances directly
-        const customers = await ctx.prisma.customer.findMany({
-          where: { isActive: true },
-          select: { balanceSdg: true },
-        });
-        const customerBalances = customers.reduce((sum, c) => sum + Number(c.balanceSdg || 0), 0);
-        if (customerBalances > 0) {
-          accountsReceivable = customerBalances;
         }
 
         return { 
@@ -1180,6 +1227,12 @@ export const accountingRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        if (ctx.user.branchId) {
+          const openCycle = await getOpenDayCycle(ctx.user.branchId);
+          if (!openCycle) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before recording a bank notice." });
+          }
+        }
         return ctx.prisma.bankNotice.create({
           data: input,
           include: { invoice: { include: { supplier: true } } },
@@ -1197,7 +1250,7 @@ export const accountingRouter = router({
         // Find the bank notice
         const notice = await ctx.prisma.bankNotice.findUnique({
           where: { id: input.id },
-          include: { invoice: true },
+          include: { invoice: { include: { purchaseOrder: true } } },
         });
         
         if (!notice) {
@@ -1206,6 +1259,15 @@ export const accountingRouter = router({
         
         if (notice.isMatched) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "Notice already matched" });
+        }
+
+        // Enforce day cycle
+        const matchBranchId = ctx.user.branchId || (notice.invoice as any)?.purchaseOrder?.branchId;
+        if (matchBranchId) {
+          const openCycle = await getOpenDayCycle(matchBranchId);
+          if (!openCycle) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before matching a bank notice." });
+          }
         }
         
         // Update notice as matched
@@ -1432,6 +1494,14 @@ export const accountingRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        // Enforce day cycle
+        if (ctx.user.branchId) {
+          const openCycle = await getOpenDayCycle(ctx.user.branchId);
+          if (!openCycle) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "Day is closed. Please open the day cycle before paying an invoice." });
+          }
+        }
+
         // For bank transfer, require transaction number (receipt image is optional for now)
         if (input.paymentMethod === "BANK_TRANSFER") {
           if (!input.transactionNumber) {
@@ -1454,23 +1524,50 @@ export const accountingRouter = router({
         const previouslyPaid = Number(invoice.paidAmountSdg) || 0;
         const newPaymentAmount = input.paidAmountSdg || (totalAmount - previouslyPaid);
         const totalPaid = previouslyPaid + newPaymentAmount;
-        
-        // Determine if invoice is fully paid or partially paid
+
         const isFullyPaid = totalPaid >= totalAmount;
         const newStatus = isFullyPaid ? "PAID" : "OUTSTANDING";
 
-        return ctx.prisma.supplierInvoice.update({
-          where: { id: input.id },
-          data: {
-            status: newStatus,
-            paymentMethod: input.paymentMethod,
-            paidDate: isFullyPaid ? new Date() : null,
-            paidAmountSdg: totalPaid,
-            transactionNumber: input.transactionNumber,
-            receiptImageUrl: input.receiptImageUrl,
-            paidById: ctx.user.userId,
-          },
-          include: { supplier: true, purchaseOrder: true },
+        return ctx.prisma.$transaction(async (tx) => {
+          const updated = await tx.supplierInvoice.update({
+            where: { id: input.id },
+            data: {
+              status: newStatus,
+              paymentMethod: input.paymentMethod,
+              paidDate: isFullyPaid ? new Date() : null,
+              paidAmountSdg: totalPaid,
+              transactionNumber: input.transactionNumber,
+              receiptImageUrl: input.receiptImageUrl,
+              paidById: ctx.user.userId,
+            },
+            include: { supplier: true, purchaseOrder: true },
+          });
+
+          // For bank transfers, create a Transaction record so it shows in the bank tab
+          if (input.paymentMethod === "BANK_TRANSFER") {
+            const branchId = ctx.user.branchId || updated.purchaseOrder?.branchId;
+            if (branchId) {
+              const dayCycle = await getOpenDayCycle(branchId);
+              if (dayCycle) {
+                const exchangeRate = Number(dayCycle.exchangeRateUsdSdg) || 1;
+                await tx.transaction.create({
+                  data: {
+                    branchId,
+                    dayCycleId: dayCycle.id,
+                    transactionType: "BANK_OUT",
+                    amountSdg: newPaymentAmount,
+                    amountUsd: newPaymentAmount / exchangeRate,
+                    description: `Bank payment for supplier invoice ${invoice.invoiceNumber || input.id}`,
+                    referenceNumber: input.transactionNumber,
+                    receiptImages: input.receiptImageUrl ? [input.receiptImageUrl] : [],
+                    createdById: ctx.user.userId,
+                  },
+                });
+              }
+            }
+          }
+
+          return updated;
         });
       }),
 
