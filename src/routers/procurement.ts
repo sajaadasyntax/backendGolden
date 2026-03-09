@@ -439,10 +439,32 @@ export const procurementRouter = router({
           });
         }
 
+        if (order.status === "CANCELLED") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Cannot receive goods for a cancelled purchase order",
+          });
+        }
+
         if (!["APPROVED", "PARTIALLY_RECEIVED"].includes(order.status)) {
           throw new TRPCError({
             code: "BAD_REQUEST",
             message: "Order must be approved to receive goods",
+          });
+        }
+
+        // Reject if all linked supplier invoices are cancelled
+        const linkedInvoices = await ctx.prisma.supplierInvoice.findMany({
+          where: { purchaseOrderId: input.purchaseOrderId },
+          select: { id: true, status: true },
+        });
+        if (
+          linkedInvoices.length > 0 &&
+          linkedInvoices.every((inv) => inv.status === "CANCELLED")
+        ) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Cannot receive goods: all linked supplier invoices have been cancelled",
           });
         }
 
