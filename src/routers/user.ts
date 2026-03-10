@@ -281,6 +281,32 @@ export const userRouter = router({
         include: { branch: true },
       });
 
+      // Auto-create shelf if role is (or was changed to) SHELF_SALES and user has no shelf
+      const newRole = data.role ?? existing.role;
+      if (newRole === "SHELF_SALES") {
+        const existingShelf = await ctx.prisma.shelf.findFirst({
+          where: { userId: id, isActive: true },
+        });
+        if (!existingShelf) {
+          const username = user.email.split("@")[0];
+          let shelfCode = `SH-${id.substring(0, 8).toUpperCase()}`;
+          let counter = 1;
+          while (await ctx.prisma.shelf.findUnique({ where: { code: shelfCode } })) {
+            shelfCode = `SH-${id.substring(0, 6).toUpperCase()}-${counter}`;
+            counter++;
+          }
+          await ctx.prisma.shelf.create({
+            data: {
+              userId: id,
+              name: `${username}'s Shelf`,
+              nameAr: `رف ${username}`,
+              code: shelfCode,
+              isActive: true,
+            },
+          });
+        }
+      }
+
       // Audit log
       if (ctx.user.branchId) {
         await ctx.prisma.auditLog.create({

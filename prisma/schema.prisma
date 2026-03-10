@@ -40,12 +40,14 @@ model User {
   nameAr       String?
   role         UserRole
   branchId     String?
+  warehouseId  String?
   isActive     Boolean   @default(true)
   lastLoginAt  DateTime?
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
 
   branch                 Branch?                  @relation(fields: [branchId], references: [id])
+  warehouse              Warehouse?               @relation(fields: [warehouseId], references: [id])
   sessions               Session[]
   openedDayCycles        DayCycle[]               @relation("OpenedBy")
   closedDayCycles        DayCycle[]               @relation("ClosedBy")
@@ -68,6 +70,7 @@ model User {
 
   @@index([branchId])
   @@index([email])
+  @@index([warehouseId])
   @@map("users")
 }
 
@@ -225,6 +228,7 @@ model Warehouse {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  users             User[]
   batches           Batch[]
   goodsReceiptLines GoodsReceiptLine[]
   salesOrders       SalesOrder[]
