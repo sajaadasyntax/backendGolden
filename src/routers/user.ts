@@ -245,11 +245,13 @@ export const userRouter = router({
         nameAr: z.string().optional(),
         role: UserRoleEnum.optional(),
         branchId: z.string().uuid().optional(),
+        warehouseId: z.string().uuid().optional().nullable(),
+        shelfId: z.string().uuid().optional().nullable(),
         isActive: z.boolean().optional(),
       })
     )
     .mutation(async ({ ctx, input }) => {
-      const { id, ...data } = input;
+      const { id, shelfId, ...data } = input;
 
       const existing = await ctx.prisma.user.findUnique({
         where: { id },
@@ -278,8 +280,30 @@ export const userRouter = router({
       const user = await ctx.prisma.user.update({
         where: { id },
         data,
-        include: { branch: true },
+        include: { branch: true, warehouse: true },
       });
+
+      // If a specific shelfId was provided, assign that shelf to this user
+      if (shelfId !== undefined) {
+        if (shelfId === null) {
+          // Unassign shelf from user
+          await ctx.prisma.shelf.updateMany({
+            where: { userId: id },
+            data: { userId: null },
+          });
+        } else {
+          // Unassign any existing shelves from this user first
+          await ctx.prisma.shelf.updateMany({
+            where: { userId: id },
+            data: { userId: null },
+          });
+          // Assign the new shelf to this user
+          await ctx.prisma.shelf.update({
+            where: { id: shelfId },
+            data: { userId: id },
+          });
+        }
+      }
 
       // Auto-create shelf if role is (or was changed to) SHELF_SALES and user has no shelf
       const newRole = data.role ?? existing.role;
@@ -330,6 +354,8 @@ export const userRouter = router({
         role: user.role,
         branchId: user.branchId,
         branch: user.branch,
+        warehouseId: user.warehouseId,
+        warehouse: user.warehouse,
         isActive: user.isActive,
       };
     }),
