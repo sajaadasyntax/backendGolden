@@ -39,20 +39,23 @@ async function main() {
   console.log("✓ Created admin user:", adminUser.email);
 
   // Create other users
+  const kassalaPasswordHash = await bcrypt.hash("k123", 12);
   const users = [
-    { email: "warehouse@golden.com", name: "Warehouse Staff", nameAr: "موظف المخزن", role: "WAREHOUSE_SALES" as const },
-    { email: "shelf@golden.com", name: "Shelf Staff", nameAr: "موظف الرف", role: "SHELF_SALES" as const },
-    { email: "procurement@golden.com", name: "Procurement Staff", nameAr: "موظف المشتريات", role: "PROCUREMENT" as const },
-    { email: "accountant@golden.com", name: "Accountant", nameAr: "المحاسب", role: "ACCOUNTANT" as const },
+    { email: "warehouse@golden.com", name: "Warehouse Staff", nameAr: "موظف المخزن", role: "WAREHOUSE_SALES" as const, passwordHash },
+    { email: "shelf@golden.com", name: "Shelf Staff", nameAr: "موظف الرف", role: "SHELF_SALES" as const, passwordHash },
+    { email: "kassala@golden.com", name: "Kassala", nameAr: "كسلا", role: "SHELF_SALES" as const, passwordHash: kassalaPasswordHash },
+    { email: "procurement@golden.com", name: "Procurement Staff", nameAr: "موظف المشتريات", role: "PROCUREMENT" as const, passwordHash },
+    { email: "accountant@golden.com", name: "Accountant", nameAr: "المحاسب", role: "ACCOUNTANT" as const, passwordHash },
   ];
 
   for (const u of users) {
+    const { passwordHash: uHash, ...rest } = u;
     await prisma.user.upsert({
-      where: { email: u.email },
+      where: { email: rest.email },
       update: {},
       create: {
-        ...u,
-        passwordHash,
+        ...rest,
+        passwordHash: uHash,
         branchId: mainBranch.id,
       },
     });
@@ -73,7 +76,7 @@ async function main() {
 
   console.log("✓ Created warehouse:", warehouse.name);
 
-  // Create shelf and link to shelf user
+  // Create shelves and link to shelf users
   const shelfUser = await prisma.user.findUnique({ where: { email: "shelf@golden.com" } });
   const shelf = await prisma.shelf.upsert({
     where: { code: "SH01" },
@@ -87,6 +90,20 @@ async function main() {
   });
 
   console.log("✓ Created shelf:", shelf.name);
+
+  const kassalaUser = await prisma.user.findUnique({ where: { email: "kassala@golden.com" } });
+  const kassalaShelf = await prisma.shelf.upsert({
+    where: { code: "SH-KASSALA" },
+    update: {},
+    create: {
+      name: "Kassala Shelf",
+      nameAr: "رف كسلا",
+      code: "SH-KASSALA",
+      ...(kassalaUser ? { userId: kassalaUser.id } : {}),
+    },
+  });
+
+  console.log("✓ Created shelf:", kassalaShelf.name);
 
   // Create units
   const units = [
@@ -237,6 +254,7 @@ async function main() {
   console.log("\n✅ Database seeded successfully!");
   console.log("\n📋 Login credentials:");
   console.log("   Admin: admin@golden.com / admin123");
+  console.log("   Kassala (shelf): kassala@golden.com / k123");
   console.log("   All other users use the same password: admin123");
 }
 
