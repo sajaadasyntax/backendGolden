@@ -1629,8 +1629,9 @@ export const accountingRouter = router({
         z.object({
           id: z.string().uuid(),
           paymentMethod: z.enum(["CASH", "BANK_TRANSFER"]),
-          transactionNumber: z.string().optional(),
+          transactionNumber: z.string().regex(/^\d{6}$/).optional(),
           receiptImageUrl: z.string().optional(),
+          receiptImageUrls: z.array(z.string()).optional().default([]),
           paidAmountSdg: z.number().positive().optional(),
         })
       )
@@ -1643,13 +1644,21 @@ export const accountingRouter = router({
           }
         }
 
-        // For bank transfer, require transaction number (receipt image is optional for now)
+        // For bank transfer, require transaction number
         if (input.paymentMethod === "BANK_TRANSFER") {
           if (!input.transactionNumber) {
             throw new TRPCError({ 
               code: "BAD_REQUEST", 
               message: "Transaction number is required for bank transfer" 
             });
+          }
+          // Check duplicate 6-digit transaction number
+          const existingBankPayment = await ctx.prisma.bankPayment.findFirst({
+            where: { transactionNumber: input.transactionNumber },
+            select: { id: true },
+          });
+          if (existingBankPayment) {
+            throw new TRPCError({ code: "CONFLICT", message: `DUPLICATE_TXN:${existingBankPayment.id}` });
           }
         }
 
@@ -1673,6 +1682,11 @@ export const accountingRouter = router({
         const payDayCycle = payBranchId ? await getOpenDayCycle(payBranchId) : null;
 
         return ctx.prisma.$transaction(async (tx) => {
+          const allReceiptUrls = Array.from(new Set([
+            ...(input.receiptImageUrls || []),
+            ...(input.receiptImageUrl ? [input.receiptImageUrl] : []),
+          ]));
+
           const updated = await tx.supplierInvoice.update({
             where: { id: input.id },
             data: {
@@ -1681,7 +1695,7 @@ export const accountingRouter = router({
               paidDate: isFullyPaid ? new Date() : null,
               paidAmountSdg: totalPaid,
               transactionNumber: input.transactionNumber,
-              receiptImageUrl: input.receiptImageUrl,
+              receiptImageUrl: allReceiptUrls[0] || input.receiptImageUrl,
               paidById: ctx.user.userId,
             },
             include: { supplier: true, purchaseOrder: true },
@@ -1839,7 +1853,9 @@ export const accountingRouter = router({
           bankAccountId: z.string().uuid(),
           amountSdg: z.number().positive(),
           transactionId: z.string().optional(),
+          transactionNumber: z.string().regex(/^\d{6}$/).optional(),
           receiptImageUrl: z.string().min(1),
+          receiptImageUrls: z.array(z.string()).optional().default([]),
           description: z.string().optional(),
         })
       )
@@ -1863,13 +1879,35 @@ export const accountingRouter = router({
           }
         }
 
+        // Validate 6-digit transaction number uniqueness
+        if (input.transactionNumber) {
+          const existing = await ctx.prisma.bankPayment.findFirst({
+            where: { transactionNumber: input.transactionNumber },
+            select: { id: true },
+          });
+          if (existing) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: `DUPLICATE_TXN:${existing.id}`,
+            });
+          }
+        }
+
+        // Merge receiptImageUrl into receiptImageUrls array
+        const allImageUrls = Array.from(new Set([
+          ...(input.receiptImageUrls || []),
+          ...(input.receiptImageUrl ? [input.receiptImageUrl] : []),
+        ]));
+
         return ctx.prisma.bankPayment.create({
           data: {
             userId: ctx.user.userId,
             bankAccountId: input.bankAccountId,
             amountSdg: input.amountSdg,
             transactionId: input.transactionId,
+            transactionNumber: input.transactionNumber,
             receiptImageUrl: input.receiptImageUrl,
+            receiptImageUrls: allImageUrls,
             description: input.description,
           },
           include: { bankAccount: true, user: { select: { id: true, name: true } } },

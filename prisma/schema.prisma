@@ -184,15 +184,16 @@ model Item {
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 
-  category             ItemCategory          @relation(fields: [categoryId], references: [id])
-  unit                 Unit                  @relation(fields: [unitId], references: [id])
-  pricePolicies        PricePolicy[]
-  batches              Batch[]
-  purchaseOrderLines   PurchaseOrderLine[]
-  goodsReceiptLines    GoodsReceiptLine[]
-  salesOrderLines      SalesOrderLine[]
-  salesInvoiceLines    SalesInvoiceLine[]
-  goodsRequestLines    GoodsRequestLine[]
+  category                 ItemCategory              @relation(fields: [categoryId], references: [id])
+  unit                     Unit                      @relation(fields: [unitId], references: [id])
+  pricePolicies            PricePolicy[]
+  batches                  Batch[]
+  purchaseOrderLines       PurchaseOrderLine[]
+  goodsReceiptLines        GoodsReceiptLine[]
+  salesOrderLines          SalesOrderLine[]
+  salesInvoiceLines        SalesInvoiceLine[]
+  goodsRequestLines        GoodsRequestLine[]
+  dailyInvoiceDraftLines   DailyInvoiceDraftLine[]
 
   @@index([categoryId])
   @@index([sku])
@@ -251,6 +252,7 @@ model Shelf {
   salesInvoices          SalesInvoice[]
   dailyAggregateInvoices DailyAggregateInvoice[]
   goodsRequests          GoodsRequest[]
+  dailyInvoiceDraft      DailyInvoiceDraft?
 
   @@index([userId])
   @@map("shelves")
@@ -633,23 +635,25 @@ enum SalesOrderStatus {
 }
 
 model SalesInvoice {
-  id            String             @id @default(uuid())
-  invoiceNumber String             @unique
-  customerId    String?
-  shelfId       String
-  dayCycleId    String
-  invoiceType   SalesInvoiceType
-  invoiceDate   DateTime           @db.Date
-  dueDate       DateTime?          @db.Date
-  totalUsd      Decimal            @db.Decimal(18, 4)
-  totalSdg      Decimal            @db.Decimal(18, 2)
-  paidAmountSdg Decimal?           @db.Decimal(18, 2)
-  paymentMethod PaymentMethod?
-  status        SalesInvoiceStatus @default(DRAFT)
-  notes         String?
-  createdById   String
-  createdAt     DateTime           @default(now())
-  updatedAt     DateTime           @updatedAt
+  id                String             @id @default(uuid())
+  invoiceNumber     String             @unique
+  customerId        String?
+  shelfId           String
+  dayCycleId        String
+  invoiceType       SalesInvoiceType
+  invoiceDate       DateTime           @db.Date
+  dueDate           DateTime?          @db.Date
+  totalUsd          Decimal            @db.Decimal(18, 4)
+  totalSdg          Decimal            @db.Decimal(18, 2)
+  paidAmountSdg     Decimal?           @db.Decimal(18, 2)
+  paymentMethod     PaymentMethod?
+  transactionNumber String?
+  receiptImageUrls  String[]
+  status            SalesInvoiceStatus @default(DRAFT)
+  notes             String?
+  createdById       String
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
 
   customer  Customer?          @relation(fields: [customerId], references: [id])
   shelf     Shelf              @relation(fields: [shelfId], references: [id])
@@ -956,16 +960,18 @@ model BankAccount {
 }
 
 model BankPayment {
-  id              String            @id @default(uuid())
-  userId          String
-  bankAccountId   String
-  amountSdg       Decimal           @db.Decimal(18, 2)
-  transactionId   String?
-  receiptImageUrl String
-  description     String?
-  status          BankPaymentStatus @default(PENDING)
-  createdAt       DateTime          @default(now())
-  updatedAt       DateTime          @updatedAt
+  id                String            @id @default(uuid())
+  userId            String
+  bankAccountId     String
+  amountSdg         Decimal           @db.Decimal(18, 2)
+  transactionId     String?
+  transactionNumber String?
+  receiptImageUrl   String
+  receiptImageUrls  String[]
+  description       String?
+  status            BankPaymentStatus @default(PENDING)
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
 
   user        User        @relation(fields: [userId], references: [id])
   bankAccount BankAccount @relation(fields: [bankAccountId], references: [id])
@@ -973,7 +979,39 @@ model BankPayment {
   @@index([userId])
   @@index([bankAccountId])
   @@index([transactionId])
+  @@index([transactionNumber])
   @@map("bank_payments")
+}
+
+// ==================== DAILY INVOICE DRAFT ====================
+
+model DailyInvoiceDraft {
+  id        String   @id @default(uuid())
+  shelfId   String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  shelf Shelf                   @relation(fields: [shelfId], references: [id])
+  lines DailyInvoiceDraftLine[]
+
+  @@map("daily_invoice_drafts")
+}
+
+model DailyInvoiceDraftLine {
+  id          String   @id @default(uuid())
+  draftId     String
+  itemId      String
+  batchId     String?
+  qty         Int
+  unitPriceUsd Decimal @db.Decimal(18, 4)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  draft DailyInvoiceDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  item  Item               @relation(fields: [itemId], references: [id])
+
+  @@index([draftId])
+  @@map("daily_invoice_draft_lines")
 }
 
 enum BankPaymentStatus {

@@ -1672,5 +1672,332 @@ export const salesRouter = router({
         });
       }),
   }),
+
+  // ==================== DAILY INVOICE DRAFT ====================
+  dailyInvoiceDraft: router({
+    getOrCreate: shelfSalesProcedure
+      .input(z.object({ shelfId: z.string().uuid() }))
+      .query(async ({ ctx, input }) => {
+        const draft = await ctx.prisma.dailyInvoiceDraft.upsert({
+          where: { shelfId: input.shelfId },
+          create: { shelfId: input.shelfId },
+          update: {},
+          include: {
+            lines: {
+              include: { item: { include: { unit: true, pricePolicies: true } } },
+              orderBy: { createdAt: "asc" },
+            },
+          },
+        });
+        return draft;
+      }),
+
+    addLine: shelfSalesProcedure
+      .input(
+        z.object({
+          shelfId: z.string().uuid(),
+          itemId: z.string().uuid(),
+          qty: z.number().int().positive(),
+          unitPriceUsd: z.number().nonnegative(),
+          batchId: z.string().uuid().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const draft = await ctx.prisma.dailyInvoiceDraft.upsert({
+          where: { shelfId: input.shelfId },
+          create: { shelfId: input.shelfId },
+          update: {},
+          select: { id: true },
+        });
+
+        const line = await ctx.prisma.dailyInvoiceDraftLine.create({
+          data: {
+            draftId: draft.id,
+            itemId: input.itemId,
+            qty: input.qty,
+            unitPriceUsd: input.unitPriceUsd,
+            batchId: input.batchId,
+          },
+          include: { item: { include: { unit: true } } },
+        });
+
+        return line;
+      }),
+
+    removeLine: shelfSalesProcedure
+      .input(z.object({ lineId: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        await ctx.prisma.dailyInvoiceDraftLine.delete({
+          where: { id: input.lineId },
+        });
+        return { success: true };
+      }),
+
+    updateLineQty: shelfSalesProcedure
+      .input(
+        z.object({
+          lineId: z.string().uuid(),
+          qty: z.number().int().positive(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const line = await ctx.prisma.dailyInvoiceDraftLine.update({
+          where: { id: input.lineId },
+          data: { qty: input.qty },
+          include: { item: { include: { unit: true } } },
+        });
+        return line;
+      }),
+
+    clearDraft: shelfSalesProcedure
+      .input(z.object({ shelfId: z.string().uuid() }))
+      .mutation(async ({ ctx, input }) => {
+        const draft = await ctx.prisma.dailyInvoiceDraft.findUnique({
+          where: { shelfId: input.shelfId },
+          select: { id: true },
+        });
+        if (draft) {
+          await ctx.prisma.dailyInvoiceDraftLine.deleteMany({
+            where: { draftId: draft.id },
+          });
+        }
+        return { success: true };
+      }),
+
+    checkout: shelfSalesProcedure
+      .input(
+        z.object({
+          shelfId: z.string().uuid(),
+          paymentMethod: z.enum(["CASH", "BANK_TRANSFER", "MIXED"]),
+          cashAmountSdg: z.number().nonnegative().optional().default(0),
+          cardAmountSdg: z.number().nonnegative().optional().default(0),
+          transactionNumber: z.string().regex(/^\d{6}$/).optional(),
+          receiptImageUrls: z.array(z.string()).optional().default([]),
+          customerId: z.string().uuid().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Validate 6-digit transaction number uniqueness
+        if (input.transactionNumber) {
+          const existing = await ctx.prisma.bankPayment.findFirst({
+            where: { transactionNumber: input.transactionNumber },
+            select: { id: true, transactionNumber: true },
+          });
+          if (existing) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: `DUPLICATE_TXN:${existing.id}`,
+            });
+          }
+          // Also check SalesInvoice
+          const existingInv = await ctx.prisma.salesInvoice.findFirst({
+            where: { transactionNumber: input.transactionNumber },
+            select: { id: true, invoiceNumber: true },
+          });
+          if (existingInv) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: `DUPLICATE_TXN:${existingInv.id}`,
+            });
+          }
+        }
+
+        // Get draft with lines
+        const draft = await ctx.prisma.dailyInvoiceDraft.findUnique({
+          where: { shelfId: input.shelfId },
+          include: {
+            lines: { include: { item: true } },
+          },
+        });
+
+        if (!draft || draft.lines.length === 0) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Draft is empty. Add items before checkout.",
+          });
+        }
+
+        // Get shelf and branch
+        const shelf = await ctx.prisma.shelf.findUnique({
+          where: { id: input.shelfId },
+          include: { user: { select: { branchId: true } } },
+        });
+
+        if (!shelf || !shelf.user?.branchId) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Shelf not assigned to a user with a branch",
+          });
+        }
+
+        const dayCycle = await getOpenDayCycle(shelf.user.branchId);
+        if (!dayCycle) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Day must be open to checkout",
+          });
+        }
+
+        const exchangeRate = Number(dayCycle.exchangeRateUsdSdg);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const count = await ctx.prisma.salesInvoice.count({
+          where: { shelfId: input.shelfId },
+        });
+        const invoiceNumber = `INV-${shelf.code}-${String(count + 1).padStart(6, "0")}`;
+
+        const invoice = await ctx.prisma.$transaction(
+          async (tx) => {
+            const linesData: Array<{
+              itemId: string;
+              batchId: string;
+              qty: number;
+              unitPriceUsd: number;
+              unitPriceSdg: number;
+              unitCostUsd: number;
+              totalUsd: number;
+              totalSdg: number;
+            }> = [];
+
+            for (const line of draft.lines) {
+              let remainingQty = line.qty;
+
+              const batches = await tx.batch.findMany({
+                where: {
+                  itemId: line.itemId,
+                  shelfId: input.shelfId,
+                  qtyRemaining: { gt: 0 },
+                },
+                orderBy: { receivedDate: "asc" },
+              });
+
+              for (const batch of batches) {
+                if (remainingQty <= 0) break;
+                const qtyToConsume = Math.min(remainingQty, Number(batch.qtyRemaining));
+                await tx.batch.update({
+                  where: { id: batch.id },
+                  data: { qtyRemaining: { decrement: qtyToConsume } },
+                });
+                linesData.push({
+                  itemId: line.itemId,
+                  batchId: batch.id,
+                  qty: qtyToConsume,
+                  unitPriceUsd: Number(line.unitPriceUsd),
+                  unitPriceSdg: Number(line.unitPriceUsd) * exchangeRate,
+                  unitCostUsd: Number(batch.unitCostUsd),
+                  totalUsd: qtyToConsume * Number(line.unitPriceUsd),
+                  totalSdg: qtyToConsume * Number(line.unitPriceUsd) * exchangeRate,
+                });
+                remainingQty -= qtyToConsume;
+              }
+
+              if (remainingQty > 0) {
+                throw new TRPCError({
+                  code: "BAD_REQUEST",
+                  message: `Insufficient stock for ${line.item.nameEn}`,
+                });
+              }
+            }
+
+            const totalUsd = linesData.reduce((s, l) => s + l.totalUsd, 0);
+            const totalSdg = linesData.reduce((s, l) => s + l.totalSdg, 0);
+            const paidAmountSdg = (input.cashAmountSdg ?? 0) + (input.cardAmountSdg ?? 0);
+
+            const inv = await tx.salesInvoice.create({
+              data: {
+                invoiceNumber,
+                customerId: input.customerId,
+                shelfId: input.shelfId,
+                dayCycleId: dayCycle.id,
+                invoiceType: "RETAIL",
+                invoiceDate: today,
+                totalUsd,
+                totalSdg,
+                paidAmountSdg,
+                paymentMethod: input.paymentMethod as any,
+                transactionNumber: input.transactionNumber,
+                receiptImageUrls: input.receiptImageUrls,
+                status: "ISSUED",
+                createdById: ctx.user.userId,
+                lines: { create: linesData },
+              },
+              include: {
+                lines: { include: { item: true } },
+              },
+            });
+
+            // Stock movements
+            for (const ld of linesData) {
+              await tx.stockMovement.create({
+                data: {
+                  batchId: ld.batchId,
+                  qty: -ld.qty,
+                  movementType: "ISSUE",
+                  referenceId: inv.id,
+                  referenceType: "SalesInvoice",
+                },
+              });
+            }
+
+            // Journal entries
+            const cashAccount = await tx.account.findFirst({ where: { code: "1000", isActive: true } });
+            const bankAccount = await tx.account.findFirst({ where: { code: "1100", isActive: true } });
+            const revenueAccount = await tx.account.findFirst({ where: { code: "4000", isActive: true } });
+            const cogsAccount = await tx.account.findFirst({ where: { code: "5000", isActive: true } });
+            const inventoryAccount = await tx.account.findFirst({ where: { code: "1300", isActive: true } });
+
+            if (revenueAccount && cogsAccount && inventoryAccount) {
+              const entryCount = await tx.journalEntry.count({ where: { dayCycleId: dayCycle.id } });
+              const entryNumber = `JE-${dayCycle.cycleDate.toISOString().split("T")[0].replace(/-/g, "")}-${String(entryCount + 1).padStart(4, "0")}`;
+              const totalCostUsd = linesData.reduce((s, l) => s + l.qty * l.unitCostUsd, 0);
+              const totalCostSdg = totalCostUsd * exchangeRate;
+
+              const journalLines = [];
+              if (input.paymentMethod === "CASH" && cashAccount) {
+                journalLines.push({ accountId: cashAccount.id, debitSdg: totalSdg, debitUsd: totalUsd, creditSdg: 0, creditUsd: 0, description: `Cash from daily sale - ${invoiceNumber}` });
+              } else if (input.paymentMethod === "BANK_TRANSFER" && bankAccount) {
+                journalLines.push({ accountId: bankAccount.id, debitSdg: totalSdg, debitUsd: totalUsd, creditSdg: 0, creditUsd: 0, description: `Bank transfer from daily sale - ${invoiceNumber}` });
+              } else if (input.paymentMethod === "MIXED") {
+                if (cashAccount && (input.cashAmountSdg ?? 0) > 0) {
+                  journalLines.push({ accountId: cashAccount.id, debitSdg: input.cashAmountSdg ?? 0, debitUsd: (input.cashAmountSdg ?? 0) / exchangeRate, creditSdg: 0, creditUsd: 0, description: `Cash portion - ${invoiceNumber}` });
+                }
+                if (bankAccount && (input.cardAmountSdg ?? 0) > 0) {
+                  journalLines.push({ accountId: bankAccount.id, debitSdg: input.cardAmountSdg ?? 0, debitUsd: (input.cardAmountSdg ?? 0) / exchangeRate, creditSdg: 0, creditUsd: 0, description: `Bank portion - ${invoiceNumber}` });
+                }
+              }
+              journalLines.push({ accountId: revenueAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: totalSdg, creditUsd: totalUsd, description: `Sales revenue - ${invoiceNumber}` });
+              journalLines.push({ accountId: cogsAccount.id, debitSdg: totalCostSdg, debitUsd: totalCostUsd, creditSdg: 0, creditUsd: 0, description: `COGS - ${invoiceNumber}` });
+              journalLines.push({ accountId: inventoryAccount.id, debitSdg: 0, debitUsd: 0, creditSdg: totalCostSdg, creditUsd: totalCostUsd, description: `Inventory reduction - ${invoiceNumber}` });
+
+              await tx.journalEntry.create({
+                data: {
+                  entryNumber,
+                  dayCycleId: dayCycle.id,
+                  entryDate: today,
+                  description: `Daily Invoice Checkout ${invoiceNumber}`,
+                  referenceId: inv.id,
+                  referenceType: "SalesInvoice",
+                  isPosted: true,
+                  postedAt: new Date(),
+                  postedById: ctx.user.userId,
+                  lines: { create: journalLines },
+                },
+              });
+            }
+
+            // Clear draft lines after successful checkout
+            await tx.dailyInvoiceDraftLine.deleteMany({
+              where: { draftId: draft.id },
+            });
+
+            return inv;
+          },
+          { timeout: 30000 }
+        );
+
+        return invoice;
+      }),
+  }),
 });
 
