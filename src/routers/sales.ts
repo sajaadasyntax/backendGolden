@@ -967,7 +967,6 @@ export const salesRouter = router({
           }
 
           // Create journal entry for sales invoice
-          const isCredit = input.paymentMethod === "CREDIT";
           const cashAccount = await tx.account.findFirst({ where: { code: "1000", isActive: true } });
           const arAccount = await tx.account.findFirst({ where: { code: "1200", isActive: true } });
           const revenueAccount = await tx.account.findFirst({ where: { code: "4000", isActive: true } });
