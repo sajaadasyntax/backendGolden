@@ -110,7 +110,11 @@ app.use(
     router: appRouter,
     createContext,
     onError: ({ path, error }) => {
-      console.error(`tRPC error on ${path}:`, error);
+      // Log safely to avoid "Cannot read properties of undefined (reading 'value')"
+      // when error.cause (e.g. ZodError) has problematic structure for util.inspect
+      const safeMessage = error?.message ?? String(error);
+      const safeCode = error?.code ?? 'UNKNOWN';
+      console.error(`tRPC error on ${path}: [${safeCode}] ${safeMessage}`);
     },
   })
 );

@@ -39,7 +39,7 @@ async function main() {
   console.log("✓ Created admin user:", adminUser.email);
 
   // Create other users
-  const kassalaPasswordHash = await bcrypt.hash("k123", 12);
+  const kassalaPasswordHash = await bcrypt.hash("k12345", 12);
   const users = [
     { email: "warehouse@golden.com", name: "Warehouse Staff", nameAr: "موظف المخزن", role: "WAREHOUSE_SALES" as const, passwordHash },
     { email: "shelf@golden.com", name: "Shelf Staff", nameAr: "موظف الرف", role: "SHELF_SALES" as const, passwordHash },
