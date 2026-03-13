@@ -1,8 +1,3 @@
--- Add transactionNumber and receiptImageUrls to BankPayment
-ALTER TABLE "bank_payments" ADD COLUMN IF NOT EXISTS "transactionNumber" TEXT;
-ALTER TABLE "bank_payments" ADD COLUMN IF NOT EXISTS "receiptImageUrls" TEXT[] NOT NULL DEFAULT '{}';
-CREATE INDEX IF NOT EXISTS "bank_payments_transactionNumber_idx" ON "bank_payments"("transactionNumber");
-
 -- Add transactionNumber and receiptImageUrls to SalesInvoice
 ALTER TABLE "sales_invoices" ADD COLUMN IF NOT EXISTS "transactionNumber" TEXT;
 ALTER TABLE "sales_invoices" ADD COLUMN IF NOT EXISTS "receiptImageUrls" TEXT[] NOT NULL DEFAULT '{}';

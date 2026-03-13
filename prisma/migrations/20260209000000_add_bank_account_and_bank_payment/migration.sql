@@ -22,7 +22,9 @@ CREATE TABLE "bank_payments" (
     "bankAccountId" TEXT NOT NULL,
     "amountSdg" DECIMAL(18,2) NOT NULL,
     "transactionId" TEXT,
+    "transactionNumber" TEXT,
     "receiptImageUrl" TEXT NOT NULL,
+    "receiptImageUrls" TEXT[] NOT NULL DEFAULT '{}',
     "description" TEXT,
     "status" "BankPaymentStatus" NOT NULL DEFAULT 'PENDING',
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -33,6 +35,7 @@ CREATE TABLE "bank_payments" (
 
 -- CreateIndex
 CREATE INDEX "bank_payments_userId_idx" ON "bank_payments"("userId");
+CREATE INDEX "bank_payments_transactionNumber_idx" ON "bank_payments"("transactionNumber");
 
 -- CreateIndex
 CREATE INDEX "bank_payments_bankAccountId_idx" ON "bank_payments"("bankAccountId");
