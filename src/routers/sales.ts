@@ -825,7 +825,7 @@ export const salesRouter = router({
 
         const exchangeRate = Number(dayCycle.exchangeRateUsdSdg);
 
-        // Validate prices against policy (hidden min check)
+        // Validate prices against policy
         for (const line of input.lines) {
           const policy = await ctx.prisma.pricePolicy.findFirst({
             where: {
@@ -838,11 +838,14 @@ export const salesRouter = router({
           });
 
           if (policy) {
-            const minPrice = Number(policy.priceRangeMinUsd);
-            if (line.unitPriceUsd < minPrice) {
+            const expectedPrice = input.invoiceType === "WHOLESALE"
+              ? Number(policy.wholesalePriceUsd)
+              : Number(policy.retailPriceUsd);
+            if (Math.abs(line.unitPriceUsd - expectedPrice) > 0.001) {
+              const item = await ctx.prisma.item.findUnique({ where: { id: line.itemId }, select: { nameEn: true } });
               throw new TRPCError({
                 code: "BAD_REQUEST",
-                message: "Price not allowed for one or more items",
+                message: `Price for ${item?.nameEn || line.itemId} must be $${expectedPrice.toFixed(2)} for ${input.invoiceType} invoice`,
               });
             }
           }
@@ -924,6 +927,9 @@ export const salesRouter = router({
           const totalUsd = linesData.reduce((sum, l) => sum + l.totalUsd, 0);
           const totalSdg = linesData.reduce((sum, l) => sum + l.totalSdg, 0);
 
+          const isCredit = input.paymentMethod === "CREDIT";
+          const invoiceStatus = isCredit ? "ISSUED" : "PAID";
+
           const inv = await tx.salesInvoice.create({
             data: {
               invoiceNumber,
@@ -934,8 +940,9 @@ export const salesRouter = router({
               invoiceDate: today,
               totalUsd,
               totalSdg,
+              paidAmountSdg: isCredit ? 0 : totalSdg,
               paymentMethod: input.paymentMethod as any,
-              status: "ISSUED",
+              status: invoiceStatus,
               notes: input.notes,
               createdById: ctx.user.userId,
               lines: { create: linesData },
@@ -1842,6 +1849,28 @@ export const salesRouter = router({
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
+        // Validate prices against policy (enforce retail prices)
+        for (const line of draft.lines) {
+          const policy = await ctx.prisma.pricePolicy.findFirst({
+            where: {
+              itemId: line.itemId,
+              branchId: shelf.user.branchId,
+              effectiveFrom: { lte: today },
+              OR: [{ effectiveTo: null }, { effectiveTo: { gte: today } }],
+            },
+            orderBy: { effectiveFrom: "desc" },
+          });
+          if (policy) {
+            const expectedPrice = Number(policy.retailPriceUsd);
+            if (Math.abs(Number(line.unitPriceUsd) - expectedPrice) > 0.001) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: `Price for ${line.item.nameEn} must be $${expectedPrice.toFixed(2)} for RETAIL invoice`,
+              });
+            }
+          }
+        }
+
         const count = await ctx.prisma.salesInvoice.count({
           where: { shelfId: input.shelfId },
         });
@@ -1903,6 +1932,7 @@ export const salesRouter = router({
             const totalUsd = linesData.reduce((s, l) => s + l.totalUsd, 0);
             const totalSdg = linesData.reduce((s, l) => s + l.totalSdg, 0);
             const paidAmountSdg = (input.cashAmountSdg ?? 0) + (input.cardAmountSdg ?? 0);
+            const invoiceStatus = "PAID";
 
             const inv = await tx.salesInvoice.create({
               data: {
@@ -1914,11 +1944,11 @@ export const salesRouter = router({
                 invoiceDate: today,
                 totalUsd,
                 totalSdg,
-                paidAmountSdg,
+                paidAmountSdg: totalSdg,
                 paymentMethod: input.paymentMethod as any,
                 transactionNumber: input.transactionNumber,
                 receiptImageUrls: input.receiptImageUrls,
-                status: "ISSUED",
+                status: invoiceStatus,
                 createdById: ctx.user.userId,
                 lines: { create: linesData },
               },
