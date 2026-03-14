@@ -17,6 +17,7 @@
     "db:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:seed-minimal": "tsx prisma/seed-minimal.ts",
+    "db:seed-units": "tsx prisma/seed-units.ts",
     "db:migrate-shelves": "tsx prisma/migrate-shelves.ts"
   },
   "dependencies": {
