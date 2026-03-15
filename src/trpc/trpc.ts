@@ -1,16 +1,23 @@
 import { initTRPC, TRPCError } from "@trpc/server";
+import { ZodError } from "zod";
 import superjson from "superjson";
 import type { Context } from "./context.js";
 
 const t = initTRPC.context<Context>().create({
   transformer: superjson,
   errorFormatter({ shape, error }) {
+    let zodErrorMsg: string | null = null;
+    if (error.cause instanceof ZodError) {
+      const first = error.cause.issues[0];
+      zodErrorMsg = first ? `${first.path.join(".")}: ${first.message}` : error.cause.message;
+    } else if (error.cause instanceof Error) {
+      zodErrorMsg = error.cause.message;
+    }
     return {
       ...shape,
       data: {
         ...shape.data,
-        zodError:
-          error.cause instanceof Error ? error.cause.message : null,
+        zodError: zodErrorMsg,
       },
     };
   },
