@@ -164,9 +164,26 @@ model Unit {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  items Item[]
+  items           Item[]
+  conversionsFrom UnitConversion[] @relation("UnitConversionFrom")
+  conversionsTo   UnitConversion[] @relation("UnitConversionTo")
 
   @@map("units")
+}
+
+model UnitConversion {
+  id          String   @id @default(uuid())
+  fromUnitId  String
+  toUnitId    String
+  factor      Decimal  @db.Decimal(18, 6)  // 1 fromUnit = factor x toUnit (e.g. 1 kg = 2 x 0.5 kg => factor 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  fromUnit Unit @relation("UnitConversionFrom", fields: [fromUnitId], references: [id])
+  toUnit   Unit @relation("UnitConversionTo", fields: [toUnitId], references: [id])
+
+  @@unique([fromUnitId, toUnitId])
+  @@map("unit_conversions")
 }
 
 model Item {
@@ -204,6 +221,8 @@ model PricePolicy {
   id               String    @id @default(uuid())
   itemId           String
   branchId         String
+  warehouseId      String?
+  shelfId          String?
   wholesalePriceUsd Decimal  @db.Decimal(18, 4)
   retailPriceUsd   Decimal   @db.Decimal(18, 4)
   priceRangeMinUsd Decimal   @db.Decimal(18, 4)
@@ -213,8 +232,10 @@ model PricePolicy {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 
-  item   Item   @relation(fields: [itemId], references: [id])
-  branch Branch @relation(fields: [branchId], references: [id])
+  item      Item      @relation(fields: [itemId], references: [id])
+  branch    Branch    @relation(fields: [branchId], references: [id])
+  warehouse Warehouse? @relation(fields: [warehouseId], references: [id])
+  shelf     Shelf?     @relation(fields: [shelfId], references: [id])
 
   @@index([itemId, branchId])
   @@map("price_policies")
@@ -231,6 +252,7 @@ model Warehouse {
 
   users             User[]
   batches           Batch[]
+  pricePolicies     PricePolicy[]
   goodsReceiptLines GoodsReceiptLine[]
   salesOrders       SalesOrder[]
 
@@ -249,6 +271,7 @@ model Shelf {
 
   user                   User?                   @relation(fields: [userId], references: [id])
   batches                Batch[]
+  pricePolicies          PricePolicy[]
   salesInvoices          SalesInvoice[]
   dailyAggregateInvoices DailyAggregateInvoice[]
   goodsRequests          GoodsRequest[]

@@ -288,17 +288,33 @@ export const accountingRouter = router({
   // ==================== EXPENSES ====================
   expenses: router({
     categories: router({
-      list: protectedProcedure.query(async ({ ctx }) => {
-        return ctx.prisma.expenseCategory.findMany({
-          where: { isActive: true },
-          orderBy: { name: "asc" },
-        });
-      }),
+      list: protectedProcedure
+        .input(z.object({ includeInactive: z.boolean().optional() }).optional())
+        .query(async ({ ctx, input }) => {
+          return ctx.prisma.expenseCategory.findMany({
+            where: input?.includeInactive ? {} : { isActive: true },
+            orderBy: { name: "asc" },
+          });
+        }),
 
       create: adminProcedure
         .input(z.object({ name: z.string().min(2), nameAr: z.string().min(2) }))
         .mutation(async ({ ctx, input }) => {
           return ctx.prisma.expenseCategory.create({ data: input });
+        }),
+
+      update: adminProcedure
+        .input(
+          z.object({
+            id: z.string().uuid(),
+            name: z.string().min(2).optional(),
+            nameAr: z.string().min(2).optional(),
+            isActive: z.boolean().optional(),
+          })
+        )
+        .mutation(async ({ ctx, input }) => {
+          const { id, ...data } = input;
+          return ctx.prisma.expenseCategory.update({ where: { id }, data });
         }),
     }),
 

@@ -1,19 +1,21 @@
 import { z } from "zod";
 import { TRPCError } from "@trpc/server";
-import { router, protectedProcedure, adminProcedure, validateBranchAccess } from "../trpc/trpc.js";
+import { router, protectedProcedure, adminProcedure, procurementProcedure, validateBranchAccess } from "../trpc/trpc.js";
 
 export const inventoryRouter = router({
   // ==================== CATEGORIES ====================
   categories: router({
-    list: protectedProcedure.query(async ({ ctx }) => {
-      return ctx.prisma.itemCategory.findMany({
-        where: { isActive: true },
-        include: { parent: true, _count: { select: { items: true } } },
-        orderBy: { name: "asc" },
-      });
-    }),
+    list: protectedProcedure
+      .input(z.object({ includeInactive: z.boolean().optional() }).optional())
+      .query(async ({ ctx, input }) => {
+        return ctx.prisma.itemCategory.findMany({
+          where: input?.includeInactive ? {} : { isActive: true },
+          include: { parent: true, _count: { select: { items: true } } },
+          orderBy: { name: "asc" },
+        });
+      }),
 
-    create: adminProcedure
+    create: procurementProcedure
       .input(
         z.object({
           name: z.string().min(2),
@@ -25,7 +27,7 @@ export const inventoryRouter = router({
         return ctx.prisma.itemCategory.create({ data: input });
       }),
 
-    update: adminProcedure
+    update: procurementProcedure
       .input(
         z.object({
           id: z.string().uuid(),
@@ -47,7 +49,7 @@ export const inventoryRouter = router({
       return ctx.prisma.unit.findMany({ orderBy: { name: "asc" } });
     }),
 
-    create: adminProcedure
+    create: procurementProcedure
       .input(
         z.object({
           name: z.string().min(1),
@@ -57,6 +59,20 @@ export const inventoryRouter = router({
       )
       .mutation(async ({ ctx, input }) => {
         return ctx.prisma.unit.create({ data: input });
+      }),
+
+    update: procurementProcedure
+      .input(
+        z.object({
+          id: z.string().uuid(),
+          name: z.string().min(1).optional(),
+          nameAr: z.string().min(1).optional(),
+          symbol: z.string().min(1).max(10).optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { id, ...data } = input;
+        return ctx.prisma.unit.update({ where: { id }, data });
       }),
   }),
 
@@ -134,7 +150,7 @@ export const inventoryRouter = router({
         return item;
       }),
 
-    create: adminProcedure
+    create: procurementProcedure
       .input(
         z.object({
           sku: z.string().min(2).max(50),
@@ -167,7 +183,7 @@ export const inventoryRouter = router({
         });
       }),
 
-    update: adminProcedure
+    update: procurementProcedure
       .input(
         z.object({
           id: z.string().uuid(),
@@ -219,24 +235,38 @@ export const inventoryRouter = router({
         z.object({
           itemId: z.string().uuid(),
           branchId: z.string().uuid(),
+          warehouseId: z.string().uuid().optional(),
+          shelfId: z.string().uuid().optional(),
         })
       )
       .query(async ({ ctx, input }) => {
-        // Validate branch access
         validateBranchAccess(ctx.user.branchId, ctx.user.role, input.branchId);
-        
-        const policy = await ctx.prisma.pricePolicy.findFirst({
-          where: {
-            itemId: input.itemId,
-            branchId: input.branchId,
-            OR: [
-              { effectiveTo: null },
-              { effectiveTo: { gte: new Date() } },
-            ],
-            effectiveFrom: { lte: new Date() },
-          },
-          orderBy: { effectiveFrom: "desc" },
-        });
+
+        const baseWhere = {
+          itemId: input.itemId,
+          branchId: input.branchId,
+          OR: [
+            { effectiveTo: null },
+            { effectiveTo: { gte: new Date() } },
+          ],
+          effectiveFrom: { lte: new Date() },
+        };
+
+        // Resolution order: shelf > warehouse > branch (prefer most specific)
+        const candidates = [
+          input.shelfId && { ...baseWhere, shelfId: input.shelfId },
+          input.warehouseId && { ...baseWhere, warehouseId: input.warehouseId, shelfId: null },
+          { ...baseWhere, warehouseId: null, shelfId: null },
+        ].filter(Boolean) as typeof baseWhere[];
+
+        let policy = null;
+        for (const where of candidates) {
+          policy = await ctx.prisma.pricePolicy.findFirst({
+            where,
+            orderBy: { effectiveFrom: "desc" },
+          });
+          if (policy) break;
+        }
 
         if (!policy) {
           return null;
@@ -256,25 +286,28 @@ export const inventoryRouter = router({
         z.object({
           branchId: z.string().uuid(),
           itemId: z.string().uuid().optional(),
+          warehouseId: z.string().uuid().optional(),
+          shelfId: z.string().uuid().optional(),
           page: z.number().int().positive().default(1),
           pageSize: z.number().int().positive().max(500).default(20),
         })
       )
       .query(async ({ ctx, input }) => {
-        // Validate branch access
         validateBranchAccess(ctx.user.branchId, ctx.user.role, input.branchId);
-        
-        const { branchId, itemId, page, pageSize } = input;
+
+        const { branchId, itemId, warehouseId, shelfId, page, pageSize } = input;
 
         const where = {
           branchId,
           ...(itemId && { itemId }),
+          ...(warehouseId !== undefined && { warehouseId: warehouseId || null }),
+          ...(shelfId !== undefined && { shelfId: shelfId || null }),
         };
 
         const [policies, total] = await Promise.all([
           ctx.prisma.pricePolicy.findMany({
             where,
-            include: { item: true },
+            include: { item: true, warehouse: true, shelf: true },
             skip: (page - 1) * pageSize,
             take: pageSize,
             orderBy: { effectiveFrom: "desc" },
@@ -291,11 +324,13 @@ export const inventoryRouter = router({
         };
       }),
 
-    create: adminProcedure
+    create: procurementProcedure
       .input(
         z.object({
           itemId: z.string().uuid(),
           branchId: z.string().uuid(),
+          warehouseId: z.string().uuid().optional(),
+          shelfId: z.string().uuid().optional(),
           wholesalePriceUsd: z.number().nonnegative(),
           retailPriceUsd: z.number().nonnegative(),
           priceRangeMinUsd: z.number().nonnegative(),
@@ -318,10 +353,12 @@ export const inventoryRouter = router({
         });
       }),
 
-    update: adminProcedure
+    update: procurementProcedure
       .input(
         z.object({
           id: z.string().uuid(),
+          warehouseId: z.string().uuid().nullable().optional(),
+          shelfId: z.string().uuid().nullable().optional(),
           wholesalePriceUsd: z.number().nonnegative().optional(),
           retailPriceUsd: z.number().nonnegative().optional(),
           priceRangeMinUsd: z.number().nonnegative().optional(),
@@ -617,6 +654,128 @@ export const inventoryRouter = router({
           pageSize,
           totalPages: Math.ceil(total / pageSize),
         };
+      }),
+
+    divideBatch: protectedProcedure
+      .input(
+        z.object({
+          batchId: z.string().uuid(),
+          targetUnitId: z.string().uuid(),
+          quantityInTargetUnit: z.number().positive(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { batchId, targetUnitId, quantityInTargetUnit } = input;
+        const batch = await ctx.prisma.batch.findUnique({
+          where: { id: batchId },
+          include: { item: { include: { unit: true } } },
+        });
+        if (!batch) throw new TRPCError({ code: "NOT_FOUND", message: "Batch not found" });
+
+        const fromUnitId = batch.item.unitId;
+        if (fromUnitId === targetUnitId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Target unit must differ from batch unit" });
+        }
+
+        const conversion = await ctx.prisma.unitConversion.findUnique({
+          where: { fromUnitId_toUnitId: { fromUnitId, toUnitId: targetUnitId } },
+        });
+        if (!conversion) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "No conversion rule from batch unit to target unit" });
+        }
+
+        const factor = Number(conversion.factor);
+        const qtyToDeduct = quantityInTargetUnit / factor;
+        const qtyRemaining = Number(batch.qtyRemaining);
+        if (qtyToDeduct > qtyRemaining) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: `Insufficient quantity. Batch has ${qtyRemaining}, need ${qtyToDeduct}` });
+        }
+
+        return ctx.prisma.$transaction(async (tx) => {
+          await tx.batch.update({
+            where: { id: batchId },
+            data: { qtyRemaining: qtyRemaining - qtyToDeduct },
+          });
+          const newBatch = await tx.batch.create({
+            data: {
+              itemId: batch.itemId,
+              warehouseId: batch.warehouseId,
+              shelfId: batch.shelfId,
+              qtyReceived: quantityInTargetUnit,
+              qtyRemaining: quantityInTargetUnit,
+              unitCostUsd: batch.unitCostUsd,
+              receivedDate: batch.receivedDate,
+              isConsignment: batch.isConsignment,
+              consignorId: batch.consignorId,
+              expiryDate: batch.expiryDate,
+            },
+          });
+          await tx.stockMovement.create({
+            data: {
+              batchId: newBatch.id,
+              qty: quantityInTargetUnit,
+              movementType: "TRANSFER_IN",
+              referenceType: "BATCH_DIVIDE",
+              referenceId: batchId,
+              notes: `Divided from batch ${batchId}`,
+            },
+          });
+          await tx.stockMovement.create({
+            data: {
+              batchId,
+              qty: -qtyToDeduct,
+              movementType: "TRANSFER_OUT",
+              referenceType: "BATCH_DIVIDE",
+              referenceId: newBatch.id,
+              notes: `Divided to batch ${newBatch.id}`,
+            },
+          });
+          return newBatch;
+        });
+      }),
+  }),
+
+  // ==================== UNIT CONVERSIONS ====================
+  unitConversions: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      return ctx.prisma.unitConversion.findMany({
+        include: { fromUnit: true, toUnit: true },
+        orderBy: { createdAt: "desc" },
+      });
+    }),
+
+    create: adminProcedure
+      .input(
+        z.object({
+          fromUnitId: z.string().uuid(),
+          toUnitId: z.string().uuid(),
+          factor: z.number().positive(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        if (input.fromUnitId === input.toUnitId) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "From and to unit must differ" });
+        }
+        return ctx.prisma.unitConversion.create({
+          data: input,
+          include: { fromUnit: true, toUnit: true },
+        });
+      }),
+
+    update: adminProcedure
+      .input(
+        z.object({
+          id: z.string().uuid(),
+          factor: z.number().positive().optional(),
+        })
+      )
+      .mutation(async ({ ctx, input }) => {
+        const { id, ...data } = input;
+        return ctx.prisma.unitConversion.update({
+          where: { id },
+          data,
+          include: { fromUnit: true, toUnit: true },
+        });
       }),
   }),
 });
