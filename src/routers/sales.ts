@@ -1849,16 +1849,20 @@ export const salesRouter = router({
         today.setHours(0, 0, 0, 0);
 
         // Validate prices against policy (enforce retail prices)
+        // Resolution order: shelf > warehouse > branch (same as getForItem)
         for (const line of draft.lines) {
-          const policy = await ctx.prisma.pricePolicy.findFirst({
-            where: {
-              itemId: line.itemId,
-              branchId: shelf.user.branchId,
-              effectiveFrom: { lte: today },
-              OR: [{ effectiveTo: null }, { effectiveTo: { gte: today } }],
-            },
-            orderBy: { effectiveFrom: "desc" },
-          });
+          const candidates = [
+            { itemId: line.itemId, branchId: shelf.user.branchId, shelfId: input.shelfId, effectiveFrom: { lte: today }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: today } }] },
+            { itemId: line.itemId, branchId: shelf.user.branchId, shelfId: null, warehouseId: null, effectiveFrom: { lte: today }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: today } }] },
+          ];
+          let policy = null;
+          for (const where of candidates) {
+            policy = await ctx.prisma.pricePolicy.findFirst({
+              where,
+              orderBy: { effectiveFrom: "desc" },
+            });
+            if (policy) break;
+          }
           if (policy) {
             const expectedPrice = Number(policy.retailPriceUsd);
             if (Math.abs(Number(line.unitPriceUsd) - expectedPrice) > 0.001) {
