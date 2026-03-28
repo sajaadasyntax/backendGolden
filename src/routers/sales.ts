@@ -825,17 +825,28 @@ export const salesRouter = router({
 
         const exchangeRate = Number(dayCycle.exchangeRateUsdSdg);
 
-        // Validate prices against policy
+        // Validate prices against policy using same resolution order as getForItem: shelf > warehouse > branch
         for (const line of input.lines) {
-          const policy = await ctx.prisma.pricePolicy.findFirst({
-            where: {
-              itemId: line.itemId,
-              branchId: shelf.user.branchId,
-              effectiveFrom: { lte: today },
-              OR: [{ effectiveTo: null }, { effectiveTo: { gte: today } }],
-            },
-            orderBy: { effectiveFrom: "desc" },
-          });
+          const baseWhere = {
+            itemId: line.itemId,
+            branchId: shelf.user.branchId,
+            effectiveFrom: { lte: today },
+            OR: [{ effectiveTo: null }, { effectiveTo: { gte: today } }],
+          };
+
+          const policyCandidates = [
+            { ...baseWhere, shelfId: input.shelfId, warehouseId: null },
+            { ...baseWhere, warehouseId: null, shelfId: null },
+          ];
+
+          let policy = null;
+          for (const where of policyCandidates) {
+            policy = await ctx.prisma.pricePolicy.findFirst({
+              where,
+              orderBy: { effectiveFrom: "desc" },
+            });
+            if (policy) break;
+          }
 
           if (policy) {
             const expectedPrice = input.invoiceType === "WHOLESALE"
