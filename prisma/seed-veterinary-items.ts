@@ -41,7 +41,7 @@ const ROWS: Row[] = [
   { nameEn: "Jiuding Oxy 20%", nameAr: "اوكسي جودن 20%", sku: "JIUD08", packSize: "50 ml", wholesale: 4000, retail: 6000 },
   { nameEn: "Jiuding Oxy 5%", nameAr: "اوكسي جودن 5%", sku: "JIUD09", packSize: "100 ml", wholesale: 4000, retail: 7000 },
   { nameEn: "Jiuding Oxy 5%", nameAr: "اوكسي جودن 5%", sku: "JIUD10", packSize: "50 ml", wholesale: 2350, retail: 4000 },
-  { nameEn: "Dipscal Syrup", nameAr: "ديبسكالسي شراب", sku: "JIUD11", packSize: "100 ml", wholesale: 2300, retail: 4000 },
+  { nameEn: "Dipscale suspect", nameAr: "ديبسكالسي شراب", sku: "JIUD11", packSize: "100 ml", wholesale: 2300, retail: 4000 },
   { nameEn: "Albendazole 2.5% Oral P.S.E", nameAr: "البندازول شراب 2.5% فارما سويد", sku: "SCC001", packSize: "500 ml", wholesale: 6900, retail: 12000 },
   { nameEn: "Dexaphan inj", nameAr: "دكسافان", sku: "SCC002", packSize: "50 ml", wholesale: 5000, retail: 8000 },
   { nameEn: "Imicarbizole P.S.E inj", nameAr: "ايميكاربزول فارما سويد", sku: "SCC003", packSize: "100 ml", wholesale: 32000, retail: 45000 },
@@ -93,6 +93,21 @@ const ROWS: Row[] = [
   { nameEn: "Penivet Forte", nameAr: "بنيفيت فورت", sku: "ASIMA4", packSize: "30 ml", wholesale: 7500, retail: 12000 },
   { nameEn: "Dexavet", nameAr: "دكسافيت", sku: "ASIMA5", packSize: "50 ml", wholesale: 5500, retail: 8000 },
 ];
+
+/** Row count matches distinct SKUs in the source price list: 11+32+13+5 = 61 (SCC is SCC001–015 + SCC016–032, no gaps in data). */
+const EXPECTED_ROW_COUNT = ROWS.length;
+{
+  const skus = ROWS.map((r) => r.sku);
+  const seen = new Set<string>();
+  const dupes: string[] = [];
+  for (const s of skus) {
+    if (seen.has(s)) dupes.push(s);
+    seen.add(s);
+  }
+  if (dupes.length) {
+    throw new Error(`seed-veterinary-items: duplicate SKUs in ROWS: ${dupes.join(", ")}`);
+  }
+}
 
 function normalizeNameEn(s: string): string {
   return s.replace(/\s*_\s*/g, " ").replace(/,\s*$/, "").trim();
@@ -168,7 +183,9 @@ async function upsertBranchPolicy(
 }
 
 async function main() {
-  console.log("🌱 Seeding veterinary / pharmaceutical items...");
+  console.log(
+    `🌱 Seeding veterinary / pharmaceutical items (${EXPECTED_ROW_COUNT} catalog rows / distinct SKUs)...`
+  );
 
   const branch = await prisma.branch.findUnique({ where: { code: "MAIN" } });
   if (!branch) {
@@ -211,7 +228,18 @@ async function main() {
     console.log(`   ✓ ${row.sku} — ${nameEn} (${row.packSize})`);
   }
 
-  console.log(`\n✅ Seeded ${n} items with MAIN branch price policies.`);
+  const itemIds = await prisma.item.findMany({
+    where: { sku: { in: ROWS.map((r) => r.sku) } },
+    select: { id: true },
+  });
+  console.log(
+    `\n✅ Done: processed ${n}/${EXPECTED_ROW_COUNT} rows; items in DB with these SKUs: ${itemIds.length}; MAIN branch price policies updated for each.`
+  );
+  if (itemIds.length !== EXPECTED_ROW_COUNT) {
+    console.warn(
+      `⚠️ SKU count mismatch — expected ${EXPECTED_ROW_COUNT} items, found ${itemIds.length}. Check for DB constraints or manual SKU edits.`
+    );
+  }
 }
 
 main()
