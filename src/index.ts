@@ -9,6 +9,7 @@ import { appRouter } from "./routers/index.js";
 import { createContext } from "./trpc/context.js";
 import { prisma } from "./lib/prisma.js";
 import { autoClosePreviousDayCycles } from "./lib/dayCycle.js";
+import csvRouter from "./routes/csv.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -97,6 +98,9 @@ app.post("/upload/receipt", upload.single("receipt"), (req, res) => {
   const fileUrl = `/uploads/receipts/${req.file.filename}`;
   res.json({ url: fileUrl, filename: req.file.filename });
 });
+
+// CSV import/export routes
+app.use("/api", csvRouter);
 
 // Health check
 app.get("/health", (_req, res) => {
